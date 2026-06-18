@@ -1,0 +1,26 @@
+[
+  {
+    "rfidCardId": "RFID-ALPHA",
+    "cardholderName": "John Doe",
+    "monthlyKwhLimit": 500,
+    "currentMonthKwhConsumed": 12.5,
+    "lastResetDate": "2026-06-18T13:28:06.293Z",
+    "isActive": true
+  },
+  {
+    "rfidCardId": "RFID-LIMIT",
+    "cardholderName": "Test Limit Card",
+    "monthlyKwhLimit": 0.05,
+    "currentMonthKwhConsumed": 0.052,
+    "lastResetDate": "2026-06-18T13:28:06.293Z",
+    "isActive": true
+  },
+  {
+    "rfidCardId": "RFID-EXPIRED",
+    "cardholderName": "Exhausted Quota",
+    "monthlyKwhLimit": 150,
+    "currentMonthKwhConsumed": 150.1,
+    "lastResetDate": "2026-06-18T13:28:06.293Z",
+    "isActive": true
+  }
+]
