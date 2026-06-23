@@ -3,7 +3,7 @@
     "rfidCardId": "RFID-ALPHA",
     "cardholderName": "John Doe",
     "monthlyKwhLimit": 500,
-    "currentMonthKwhConsumed": 12.5,
+    "currentMonthKwhConsumed": 12.58,
     "lastResetDate": "2026-06-18T13:28:06.293Z",
     "isActive": true
   },
@@ -11,7 +11,7 @@
     "rfidCardId": "RFID-LIMIT",
     "cardholderName": "Test Limit Card",
     "monthlyKwhLimit": 0.05,
-    "currentMonthKwhConsumed": 0.052,
+    "currentMonthKwhConsumed": 0,
     "lastResetDate": "2026-06-18T13:28:06.293Z",
     "isActive": true
   },
@@ -21,6 +21,22 @@
     "monthlyKwhLimit": 150,
     "currentMonthKwhConsumed": 150.1,
     "lastResetDate": "2026-06-18T13:28:06.293Z",
+    "isActive": true
+  },
+  {
+    "rfidCardId": "QWQEE12",
+    "cardholderName": "Vingvong",
+    "monthlyKwhLimit": 200,
+    "currentMonthKwhConsumed": 0,
+    "lastResetDate": "2026-06-19T05:56:26.622Z",
+    "isActive": true
+  },
+  {
+    "rfidCardId": "0429DD0AD86380",
+    "cardholderName": "Pingpong Palong",
+    "monthlyKwhLimit": 200,
+    "currentMonthKwhConsumed": 0,
+    "lastResetDate": "2026-06-19T06:20:35.766Z",
     "isActive": true
   }
 ]

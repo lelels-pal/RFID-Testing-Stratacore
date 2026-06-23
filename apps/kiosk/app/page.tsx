@@ -41,6 +41,21 @@ function getBackendUrl() {
   return 'http://localhost:4001';
 }
 
+// Quotas reset on the 1st of every calendar month. Returns the next reset date.
+function getNextResetDate(): Date {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth() + 1, 1);
+}
+
+function formatResetLabel(): string {
+  const next = getNextResetDate();
+  return next.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+function isCardExhausted(card: RfidCard): boolean {
+  return card.currentMonthKwhConsumed >= card.monthlyKwhLimit;
+}
+
 export default function AdminDashboardPage() {
   // Authentication State
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -71,6 +86,12 @@ export default function AdminDashboardPage() {
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
 
+  // Edit Allocation State
+  const [editingCard, setEditingCard] = useState<RfidCard | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editLimit, setEditLimit] = useState('');
+  const [editError, setEditError] = useState('');
+
   // Charger Activation Modal/Panel State
   const [selectedChargerId, setSelectedChargerId] = useState<string | null>(null);
   const [selectedRfid, setSelectedRfid] = useState('');
@@ -96,11 +117,12 @@ export default function AdminDashboardPage() {
     }
   };
 
-  // Triggered when backend is resolved or on interval
+  // Triggered when backend is resolved or on interval. Polls frequently so a
+  // card's monthly consumption visibly counts up while a session is charging.
   useEffect(() => {
     if (!backendUrl) return;
     fetchRfids();
-    const interval = setInterval(fetchRfids, 8000);
+    const interval = setInterval(fetchRfids, 3000);
     return () => clearInterval(interval);
   }, [backendUrl]);
 
@@ -346,6 +368,49 @@ export default function AdminDashboardPage() {
       fetchRfids();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  // Open the edit allocation modal for a card
+  const handleOpenEdit = (card: RfidCard) => {
+    setEditingCard(card);
+    setEditName(card.cardholderName);
+    setEditLimit(String(card.monthlyKwhLimit));
+    setEditError('');
+  };
+
+  // Save edited allocation (cardholder name + monthly kWh limit)
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCard) return;
+    setEditError('');
+
+    const limitValue = parseFloat(editLimit);
+    if (!editName.trim()) {
+      setEditError('Cardholder name is required.');
+      return;
+    }
+    if (isNaN(limitValue) || limitValue < 0) {
+      setEditError('Monthly kWh allocation must be a non-negative number.');
+      return;
+    }
+
+    try {
+      const res = await fetch(`${backendUrl}/api/v1/charging/rfid/${editingCard.rfidCardId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cardholderName: editName.trim(),
+          monthlyKwhLimit: limitValue,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to update allocation');
+
+      setEditingCard(null);
+      fetchRfids();
+    } catch (err) {
+      setEditError((err as Error).message);
     }
   };
 
@@ -1293,7 +1358,7 @@ export default function AdminDashboardPage() {
                             <option value="">-- Choose RFID Card --</option>
                             {rfidCards.filter(c => c.isActive).map((card) => (
                               <option key={card.rfidCardId} value={card.rfidCardId}>
-                                {card.rfidCardId} - {card.cardholderName} ({card.currentMonthKwhConsumed.toFixed(1)}/{card.monthlyKwhLimit} kWh consumed)
+                                {card.rfidCardId} - {card.cardholderName} ({card.currentMonthKwhConsumed.toFixed(1)}/{card.monthlyKwhLimit} kWh){isCardExhausted(card) ? ' — QUOTA EXHAUSTED' : ''}
                               </option>
                             ))}
                           </select>
@@ -1328,19 +1393,34 @@ export default function AdminDashboardPage() {
                           </div>
                         )}
 
-                        {activationError && <div style={{ ...loginStyles.errorMessage, marginTop: 10 }}>{activationError}</div>}
+                        {(() => {
+                          const card = rfidCards.find(c => c.rfidCardId === selectedRfid);
+                          const exhausted = card ? isCardExhausted(card) : false;
+                          return (
+                            <>
+                              {exhausted && (
+                                <div style={{ ...loginStyles.errorMessage, marginTop: 10 }}>
+                                  Monthly quota exhausted ({card!.currentMonthKwhConsumed.toFixed(2)}/{card!.monthlyKwhLimit} kWh).
+                                  This card cannot charge until it resets on {formatResetLabel()}.
+                                </div>
+                              )}
+                              {activationError && <div style={{ ...loginStyles.errorMessage, marginTop: 10 }}>{activationError}</div>}
 
-                        <button
-                          onClick={handleStartCharging}
-                          disabled={!selectedRfid}
-                          style={{
-                            ...dashStyles.btnSubmit,
-                            marginTop: 20,
-                            opacity: !selectedRfid ? 0.6 : 1,
-                          }}
-                        >
-                          Simulate Tap & Start Charging
-                        </button>
+                              <button
+                                onClick={handleStartCharging}
+                                disabled={!selectedRfid || exhausted}
+                                style={{
+                                  ...dashStyles.btnSubmit,
+                                  marginTop: 20,
+                                  opacity: (!selectedRfid || exhausted) ? 0.6 : 1,
+                                  cursor: (!selectedRfid || exhausted) ? 'not-allowed' : 'pointer',
+                                }}
+                              >
+                                {exhausted ? 'Quota Exhausted — Charging Blocked' : 'Simulate Tap & Start Charging'}
+                              </button>
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
 
@@ -1378,6 +1458,31 @@ export default function AdminDashboardPage() {
                             <div style={cpStyles.liveGaugeLbl}>kWh DELIVERED</div>
                           </div>
                         </div>
+
+                        {/* Live monthly quota for the tapped card */}
+                        {(() => {
+                          const activeRfid = sessions[selectedChargerId].activeRfid;
+                          const card = activeRfid ? rfidCards.find(c => c.rfidCardId === activeRfid) : undefined;
+                          if (!card) return null;
+                          const pct = Math.min((card.currentMonthKwhConsumed / card.monthlyKwhLimit) * 100, 100);
+                          const remaining = Math.max(0, card.monthlyKwhLimit - card.currentMonthKwhConsumed);
+                          return (
+                            <div style={{ marginTop: 16, padding: '12px 14px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 6 }}>
+                                <span style={{ color: '#475569', fontWeight: 600 }}>{card.rfidCardId} · {card.cardholderName}</span>
+                                <span style={{ color: pct >= 100 ? '#ef4444' : '#475569' }}>
+                                  {card.currentMonthKwhConsumed.toFixed(3)} / {card.monthlyKwhLimit} kWh
+                                </span>
+                              </div>
+                              <div style={dashStyles.tableProgressBg}>
+                                <div style={{ ...dashStyles.tableProgressFill, width: `${pct}%`, backgroundColor: pct >= 100 ? '#ef4444' : '#7c3aed' }} />
+                              </div>
+                              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>
+                                {remaining.toFixed(3)} kWh remaining this month
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                         {sessions[selectedChargerId].telemetry && (
                           <div style={dashStyles.metricsGrid}>
@@ -1499,6 +1604,9 @@ export default function AdminDashboardPage() {
                 <div style={{ flex: '2 1 600px' }}>
                   <div style={dashStyles.panelCard}>
                     <h3 style={dashStyles.panelTitle}>RFID CARD REGISTRY</h3>
+                    <p style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>
+                      Allocations reset automatically on the 1st of each month. Next reset: <strong style={{ color: '#7c3aed' }}>{formatResetLabel()}</strong>.
+                    </p>
                     <div style={{ overflowX: 'auto', marginTop: 15 }}>
                       <table style={dashStyles.table}>
                         <thead>
@@ -1559,6 +1667,13 @@ export default function AdminDashboardPage() {
                                 <td style={dashStyles.tableBodyCell}>
                                   <div style={{ display: 'flex', gap: 6 }}>
                                     <button
+                                      onClick={() => handleOpenEdit(card)}
+                                      style={dashStyles.editBtn}
+                                      title="Edit cardholder name and monthly kWh allocation"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
                                       onClick={() => handleResetQuota(card.rfidCardId)}
                                       style={dashStyles.resetBtn}
                                       title="Reset current monthly consumption to 0"
@@ -1591,6 +1706,55 @@ export default function AdminDashboardPage() {
                 </div>
 
               </div>
+
+              {/* EDIT ALLOCATION MODAL */}
+              {editingCard && (
+                <div style={cpStyles.overlay}>
+                  <div style={{ ...cpStyles.modalCard, maxWidth: 460 }}>
+                    <div style={cpStyles.modalHeader}>
+                      <div>
+                        <h3 style={cpStyles.modalTitle}>Edit Allocation</h3>
+                        <p style={cpStyles.modalSubtitle}>Card: {editingCard.rfidCardId}</p>
+                      </div>
+                      <button onClick={() => setEditingCard(null)} style={cpStyles.closeModalBtn}>✕</button>
+                    </div>
+
+                    <div style={cpStyles.modalBody}>
+                      <form onSubmit={handleSaveEdit}>
+                        <div style={dashStyles.formGroup}>
+                          <label style={dashStyles.label}>Cardholder Name</label>
+                          <input
+                            type="text"
+                            value={editName}
+                            onChange={(e) => setEditName(e.target.value)}
+                            style={dashStyles.input}
+                          />
+                        </div>
+
+                        <div style={dashStyles.formGroup}>
+                          <label style={dashStyles.label}>Monthly Quota (kWh)</label>
+                          <input
+                            type="number"
+                            value={editLimit}
+                            onChange={(e) => setEditLimit(e.target.value)}
+                            style={dashStyles.input}
+                          />
+                          <p style={{ color: '#64748b', fontSize: 12, marginTop: 6 }}>
+                            Consumed so far this month: <strong>{editingCard.currentMonthKwhConsumed.toFixed(2)} kWh</strong>.
+                            Changing the limit keeps existing consumption. Quota resets on {formatResetLabel()}.
+                          </p>
+                        </div>
+
+                        {editError && <div style={{ ...loginStyles.errorMessage, marginBottom: 15 }}>{editError}</div>}
+
+                        <button type="submit" style={dashStyles.btnSubmit}>
+                          Save Allocation
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2308,6 +2472,16 @@ const dashStyles = {
     fontSize: 11,
     fontWeight: 700,
     border: 'none',
+    cursor: 'pointer',
+  },
+  editBtn: {
+    padding: '3px 8px',
+    borderRadius: 6,
+    backgroundColor: '#ede9fe',
+    color: '#6d28d9',
+    border: '1px solid #c4b5fd',
+    fontSize: 11,
+    fontWeight: 600,
     cursor: 'pointer',
   },
   resetBtn: {

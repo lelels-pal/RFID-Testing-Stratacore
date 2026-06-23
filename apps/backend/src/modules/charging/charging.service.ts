@@ -134,6 +134,35 @@ export class ChargingService implements OnModuleInit {
       }
     });
 
+    // A charging transaction started directly on the charger (e.g. a driver
+    // physically tapped their RFID card on the unit). Link that card to the
+    // charger so energy is deducted from its monthly quota in real time and the
+    // mid-session limit cutoff applies, exactly like the kiosk remote-start flow.
+    realtimeAdapter.on('startTransaction', async (event: { chargerId: string; connectorId: number; transactionId?: number; idTag?: string }) => {
+      // Already linked by the kiosk/guest remote-start flow — nothing to do.
+      if (this.chargerToRfidMap.has(event.chargerId)) {
+        return;
+      }
+      if (!event.idTag) return;
+
+      try {
+        const card = await this.rfidService.getById(event.idTag);
+        if (!card) return; // Not a registered RFID card (e.g. a guest payment session).
+
+        this.chargerToRfidMap.set(event.chargerId, card.rfidCardId);
+        this.sessionEnergyMap.set(event.chargerId, 0);
+        this.activeSessions.add(event.chargerId);
+        this.clearStartWatchdog(event.chargerId);
+
+        this.logger.log(
+          `Physical RFID tap on ${event.chargerId} linked to card ${card.rfidCardId}. ` +
+          `Quota: ${card.currentMonthKwhConsumed.toFixed(2)} / ${card.monthlyKwhLimit} kWh.`
+        );
+      } catch (err) {
+        this.logger.error(`Failed to link RFID card for startTransaction on ${event.chargerId}:`, err);
+      }
+    });
+
     realtimeAdapter.on('stopTransaction', (event: { chargerId: string; connectorId: number }) => {
       this.clearStartWatchdog(event.chargerId);
       this.chargerToRfidMap.delete(event.chargerId);
