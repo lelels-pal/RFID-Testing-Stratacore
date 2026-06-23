@@ -6,6 +6,7 @@ import { OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus } from '@pac
 export interface IChargerController {
   remoteStart(chargerId: string, connectorId: number, idTag: string): Promise<OcppRemoteStartResult>;
   remoteStop(chargerId: string, transactionId?: number): Promise<OcppRemoteStopResult>;
+  cancelSession(chargerId: string, connectorId?: number): Promise<OcppRemoteStopResult>;
   getChargerStatus(chargerId: string, connectorId: number): Promise<ChargerStatus>;
 }
 
@@ -50,6 +51,8 @@ interface ChargerConnectionState {
 interface OcppActionResponseMap {
   RemoteStartTransaction: { status?: string };
   RemoteStopTransaction: { status?: string };
+  Reset: { status?: string };
+  ChangeAvailability: { status?: string };
 }
 
 export interface AdapterConfig {
@@ -173,8 +176,126 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
     };
   }
 
+  /**
+   * Stops an active transaction, or cancels a Preparing session that has not
+   * yet reported StartTransaction (common after RemoteStart / RFID authorize).
+   */
+  async cancelSession(chargerId: string, connectorId = 1): Promise<OcppRemoteStopResult> {
+    const charger = this.ensureChargerState(chargerId, connectorId);
+    if (!charger.socket || charger.socket.readyState !== WebSocket.OPEN) {
+      return {
+        success: false,
+        status: 'Unknown',
+        errorMessage: `Charger ${chargerId} is offline or not connected to the OCPP central system.`,
+      };
+    }
+
+    if (charger.activeTransactionId != null) {
+      return this.remoteStop(chargerId, charger.activeTransactionId);
+    }
+
+    const abortPreparing = async (): Promise<OcppRemoteStopResult> => {
+      try {
+        const resetResponse = (await this.sendCall<OcppActionResponseMap['Reset']>(
+          charger,
+          'Reset',
+          { type: 'Soft' }
+        )) as OcppActionResponseMap['Reset'];
+
+        if (resetResponse?.status === 'Accepted') {
+          this.clearPendingSession(charger);
+          return { success: true, status: 'Accepted' };
+        }
+      } catch (error) {
+        console.warn(`[SteveOcppAdapter] Reset failed for ${chargerId}:`, error);
+      }
+
+      try {
+        const inopResponse = (await this.sendCall<OcppActionResponseMap['ChangeAvailability']>(
+          charger,
+          'ChangeAvailability',
+          { connectorId, type: 'Inoperative' }
+        )) as OcppActionResponseMap['ChangeAvailability'];
+
+        const operativeResponse = (await this.sendCall<OcppActionResponseMap['ChangeAvailability']>(
+          charger,
+          'ChangeAvailability',
+          { connectorId, type: 'Operative' }
+        )) as OcppActionResponseMap['ChangeAvailability'];
+
+        if (inopResponse?.status === 'Accepted' && operativeResponse?.status === 'Accepted') {
+          this.clearPendingSession(charger);
+          return { success: true, status: 'Accepted' };
+        }
+      } catch (error) {
+        console.warn(`[SteveOcppAdapter] ChangeAvailability cancel failed for ${chargerId}:`, error);
+      }
+
+      return {
+        success: false,
+        status: 'Rejected',
+        errorMessage: `Could not cancel preparing session on charger ${chargerId}.`,
+      };
+    };
+
+    if (charger.status === 'Preparing' || charger.activeSessionId) {
+      return abortPreparing();
+    }
+
+    return {
+      success: false,
+      status: 'Unknown',
+      errorMessage: `No active or preparing session found for charger ${chargerId}.`,
+    };
+  }
+
+  private clearPendingSession(charger: ChargerConnectionState) {
+    charger.status = 'Available';
+    charger.activeSessionId = undefined;
+    charger.activeTransactionId = undefined;
+    charger.meterStartWh = undefined;
+    charger.chargingStartAt = undefined;
+    this.emit('status', {
+      chargerId: charger.chargerId,
+      connectorId: charger.connectorId,
+      status: charger.status,
+    });
+  }
+
   async getChargerStatus(chargerId: string, connectorId: number): Promise<ChargerStatus> {
     return this.ensureChargerState(chargerId, connectorId).status;
+  }
+
+  isChargerConnected(chargerId: string): boolean {
+    const charger = this.chargers.get(chargerId);
+    return charger?.socket?.readyState === WebSocket.OPEN;
+  }
+
+  getChargerConnectionInfo(chargerId: string): {
+    chargerId: string;
+    connected: boolean;
+    status: ChargerStatus;
+    lastSeenAt?: string;
+  } {
+    const charger = this.chargers.get(chargerId);
+    return {
+      chargerId,
+      connected: charger?.socket?.readyState === WebSocket.OPEN,
+      status: charger?.status ?? 'Unavailable',
+      lastSeenAt: charger?.lastSeenAt,
+    };
+  }
+
+  listChargerConnections(chargerIds?: string[]): Array<{
+    chargerId: string;
+    connected: boolean;
+    status: ChargerStatus;
+    lastSeenAt?: string;
+  }> {
+    const ids = chargerIds?.length
+      ? chargerIds
+      : Array.from(this.chargers.keys());
+    return ids.map((chargerId) => this.getChargerConnectionInfo(chargerId));
   }
 
   getEndpointForCharger(chargerId: string): string {
@@ -276,6 +397,12 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
             idTagInfo: {
               status: authStatus,
             },
+          });
+          this.emit('authorize', {
+            chargerId: charger.chargerId,
+            connectorId: charger.connectorId,
+            idTag: payload?.idTag || '',
+            status: authStatus,
           });
           return;
         }

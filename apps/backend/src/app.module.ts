@@ -7,14 +7,17 @@ import { ChargingService } from './modules/charging/charging.service';
 import { ChargingController } from './modules/charging/charging.controller';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { RfidService } from './modules/charging/rfid.service';
+import { HealthController } from './modules/health/health.controller';
+import { WatchdogModule } from './modules/watchdog/watchdog.module';
 import { SteveOcppAdapter } from '@packages/ocpp-adapter';
 
 @Module({
-  imports: [],
+  imports: [WatchdogModule],
   controllers: [
     AuthController,
     ChargingController,
-    PaymentsController
+    PaymentsController,
+    HealthController,
   ],
   providers: [
     RedisService,

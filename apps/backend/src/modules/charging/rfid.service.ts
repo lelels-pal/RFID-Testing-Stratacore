@@ -20,35 +20,9 @@ export class RfidService {
         this.cards = JSON.parse(fileContent);
         this.logger.log(`Loaded ${this.cards.length} RFID cards from local persistence.`);
       } else {
-        // Seed default test cards if no database exists
-        this.cards = [
-          {
-            rfidCardId: 'RFID-ALPHA',
-            cardholderName: 'John Doe',
-            monthlyKwhLimit: 500,
-            currentMonthKwhConsumed: 12.5,
-            lastResetDate: new Date().toISOString(),
-            isActive: true,
-          },
-          {
-            rfidCardId: 'RFID-LIMIT',
-            cardholderName: 'Test Limit Card',
-            monthlyKwhLimit: 0.05,
-            currentMonthKwhConsumed: 0.0,
-            lastResetDate: new Date().toISOString(),
-            isActive: true,
-          },
-          {
-            rfidCardId: 'RFID-EXPIRED',
-            cardholderName: 'Exhausted Quota',
-            monthlyKwhLimit: 150,
-            currentMonthKwhConsumed: 150.1,
-            lastResetDate: new Date().toISOString(),
-            isActive: true,
-          }
-        ];
+        this.cards = [];
         this.saveCards();
-        this.logger.log('Seeded default RFID test cards into rfids.json.');
+        this.logger.log('Initialized empty RFID card registry.');
       }
     } catch (error) {
       this.logger.error('Failed to load RFID cards:', error);

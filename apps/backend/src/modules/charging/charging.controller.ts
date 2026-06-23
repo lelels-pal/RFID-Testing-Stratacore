@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Put, Delete, Body, Param, Headers, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { Controller, Post, Get, Put, Delete, Body, Param, Headers, Query, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { ChargingService } from './charging.service';
 import { AuthService } from '../auth/auth.service';
 import { RfidService } from './rfid.service';
@@ -15,6 +15,17 @@ export class ChargingController {
   @Get('rfid')
   async listRfids() {
     return this.rfidService.getAll();
+  }
+
+  @Get('chargers')
+  async listChargers(@Query('ids') ids?: string) {
+    const chargerIds = ids
+      ? ids.split(',').map((id) => id.trim()).filter(Boolean)
+      : [];
+    if (chargerIds.length === 0) {
+      throw new BadRequestException('Query parameter "ids" is required (comma-separated charger IDs).');
+    }
+    return this.chargingService.getChargersStatus(chargerIds);
   }
 
   @Post('rfid')

@@ -45,6 +45,7 @@ export enum WebSocketEvents {
   METER_UPDATE = 'charger:meter_update',     // Periodic telemetry stream
   SESSION_COMPLETED = 'session:completed',   // Charging stopped/finished
   SESSION_ERROR = 'session:error',           // Failure event (e.g. timeout, fault)
+  RFID_AUTH_DENIED = 'rfid:auth_denied',     // Unregistered/blocked RFID tap rejected
 
   // From Client to Server
   SUBSCRIBE_CHARGER = 'subscribe:charger',   // Client registers for updates to a specific chargerId
@@ -54,6 +55,15 @@ export interface WsSessionClaimedPayload {
   chargerId: string;
   connectorId: number;
   claimedAt: string;
+}
+
+export interface WsRfidAuthDeniedPayload {
+  chargerId: string;
+  connectorId: number;
+  rfidCardId: string;
+  reason: 'Invalid' | 'Blocked' | 'Expired';
+  message: string;
+  timestamp: string;
 }
 
 export interface WsMeterUpdatePayload {
@@ -125,5 +135,12 @@ export interface RfidStartRequest {
   chargerId: string;
   connectorId: number;
   rfidCardId: string;
+}
+
+export interface ChargerConnectionInfo {
+  chargerId: string;
+  connected: boolean;
+  status: ChargerStatus;
+  lastSeenAt?: string;
 }
 

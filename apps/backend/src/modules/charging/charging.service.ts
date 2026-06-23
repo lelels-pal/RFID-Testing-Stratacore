@@ -3,7 +3,10 @@ import { IChargerController, MeterUpdateEvent, SteveOcppAdapter } from '@package
 import { RedisService } from '../redis/redis.service';
 import { ChargerGateway } from './charging.gateway';
 import { RfidService } from './rfid.service';
-import { WebSocketEvents, OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus } from '@packages/shared';
+import { ChargeStartWatchdogService } from '../watchdog/charge-start-watchdog.service';
+import { StaleSessionWatchdogService, TrackedSession } from '../watchdog/stale-session-watchdog.service';
+import { WatchdogEventLogService } from '../watchdog/watchdog-event-log.service';
+import { WebSocketEvents, OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus, ChargerConnectionInfo } from '@packages/shared';
 
 @Injectable()
 export class ChargingService implements OnModuleInit {
@@ -14,12 +17,19 @@ export class ChargingService implements OnModuleInit {
   // Tracks current session energy to compute incremental deltas: chargerId -> lastSessionEnergyKwh
   private readonly sessionEnergyMap = new Map<string, number>();
 
+  // Session metadata for stale-session recovery.
+  private readonly sessionStartedAt = new Map<string, string>();
+  private readonly sessionConnectors = new Map<string, number>();
+
   constructor(
     @Inject('IChargerController')
     private readonly ocppAdapter: IChargerController,
     private readonly redis: RedisService,
     private readonly wsGateway: ChargerGateway,
     private readonly rfidService: RfidService,
+    private readonly chargeStartWatchdog: ChargeStartWatchdogService,
+    private readonly staleSessionWatchdog: StaleSessionWatchdogService,
+    private readonly watchdogEvents: WatchdogEventLogService,
   ) {}
 
   // Tracks chargers that currently have a live session, so idle status
@@ -27,15 +37,14 @@ export class ChargingService implements OnModuleInit {
   // not misread as a completed session.
   private readonly activeSessions = new Set<string>();
 
-  // How long to wait for an actual charging transaction to begin after a
-  // RemoteStart before giving up (e.g. the driver never plugs in a vehicle).
-  private readonly startTimeoutMs = Number(process.env.CHARGE_START_TIMEOUT_MS) || 60_000;
-
-  // Per-charger "no vehicle" watchdog timers, keyed by chargerId.
-  private readonly startWatchdogs = new Map<string, NodeJS.Timeout>();
-
   onModuleInit() {
     const realtimeAdapter = this.ocppAdapter as SteveOcppAdapter;
+
+    this.staleSessionWatchdog.setOcppAdapter(realtimeAdapter);
+    this.staleSessionWatchdog.registerRecoveryHandler({
+      getActiveSessions: () => this.getActiveSessions(),
+      recoverStaleSession: (chargerId, connectorId) => this.recoverStaleSession(chargerId, connectorId),
+    });
 
     realtimeAdapter.on('status', (event: { chargerId: string; connectorId: number; status: ChargerStatus }) => {
       if (event.status === 'Preparing') {
@@ -50,7 +59,7 @@ export class ChargingService implements OnModuleInit {
       if (event.status === 'Charging') {
         // A real charging transaction has begun, so the "no vehicle" watchdog
         // is no longer needed.
-        this.clearStartWatchdog(event.chargerId);
+        this.chargeStartWatchdog.clear(event.chargerId);
         this.activeSessions.add(event.chargerId);
         this.wsGateway.emitChargerStatus(event.chargerId, WebSocketEvents.CHARGER_STARTING, {
           chargerId: event.chargerId,
@@ -60,7 +69,8 @@ export class ChargingService implements OnModuleInit {
       }
 
       if (event.status === 'Finishing' || event.status === 'Available') {
-        this.clearStartWatchdog(event.chargerId);
+        this.chargeStartWatchdog.clear(event.chargerId);
+        this.clearSessionMetadata(event.chargerId);
         this.chargerToRfidMap.delete(event.chargerId);
         this.sessionEnergyMap.delete(event.chargerId);
 
@@ -76,7 +86,8 @@ export class ChargingService implements OnModuleInit {
       }
 
       if (event.status === 'Faulted' || event.status === 'Unavailable') {
-        this.clearStartWatchdog(event.chargerId);
+        this.chargeStartWatchdog.clear(event.chargerId);
+        this.clearSessionMetadata(event.chargerId);
         this.chargerToRfidMap.delete(event.chargerId);
         this.sessionEnergyMap.delete(event.chargerId);
 
@@ -134,10 +145,41 @@ export class ChargingService implements OnModuleInit {
       }
     });
 
-    // A charging transaction started directly on the charger (e.g. a driver
-    // physically tapped their RFID card on the unit). Link that card to the
-    // charger so energy is deducted from its monthly quota in real time and the
-    // mid-session limit cutoff applies, exactly like the kiosk remote-start flow.
+    realtimeAdapter.on(
+      'authorize',
+      (event: {
+        chargerId: string;
+        connectorId: number;
+        idTag: string;
+        status: 'Accepted' | 'Blocked' | 'Expired' | 'Invalid';
+      }) => {
+        if (event.status === 'Accepted') return;
+
+        const messages: Record<'Invalid' | 'Blocked' | 'Expired', string> = {
+          Invalid: `Unregistered RFID card ${event.idTag} tapped. Charging denied — register this card in Top-Up.`,
+          Blocked: `RFID card ${event.idTag} is blocked or quota exhausted. Charging denied.`,
+          Expired: `RFID card ${event.idTag} has expired. Charging denied.`,
+        };
+
+        const reason = event.status === 'Invalid' || event.status === 'Blocked' || event.status === 'Expired'
+          ? event.status
+          : 'Invalid';
+
+        this.logger.warn(
+          `RFID authorization denied on ${event.chargerId}: idTag=${event.idTag}, reason=${reason}`
+        );
+
+        this.wsGateway.emitChargerStatus(event.chargerId, WebSocketEvents.RFID_AUTH_DENIED, {
+          chargerId: event.chargerId,
+          connectorId: event.connectorId,
+          rfidCardId: event.idTag,
+          reason,
+          message: messages[reason],
+          timestamp: new Date().toISOString(),
+        });
+      }
+    );
+
     realtimeAdapter.on('startTransaction', async (event: { chargerId: string; connectorId: number; transactionId?: number; idTag?: string }) => {
       // Already linked by the kiosk/guest remote-start flow — nothing to do.
       if (this.chargerToRfidMap.has(event.chargerId)) {
@@ -152,7 +194,7 @@ export class ChargingService implements OnModuleInit {
         this.chargerToRfidMap.set(event.chargerId, card.rfidCardId);
         this.sessionEnergyMap.set(event.chargerId, 0);
         this.activeSessions.add(event.chargerId);
-        this.clearStartWatchdog(event.chargerId);
+        this.chargeStartWatchdog.clear(event.chargerId);
 
         this.logger.log(
           `Physical RFID tap on ${event.chargerId} linked to card ${card.rfidCardId}. ` +
@@ -164,7 +206,8 @@ export class ChargingService implements OnModuleInit {
     });
 
     realtimeAdapter.on('stopTransaction', (event: { chargerId: string; connectorId: number }) => {
-      this.clearStartWatchdog(event.chargerId);
+      this.chargeStartWatchdog.clear(event.chargerId);
+      this.clearSessionMetadata(event.chargerId);
       this.chargerToRfidMap.delete(event.chargerId);
       this.sessionEnergyMap.delete(event.chargerId);
 
@@ -178,13 +221,14 @@ export class ChargingService implements OnModuleInit {
   }
 
   /**
-   * Initiates payment checkout process by contacting the Paynamics gateway (mock).
+   * Initiates payment checkout via Paynamics gateway.
    */
   async initiateCheckout(chargerId: string, connectorId: number, tariffPlanId: string): Promise<{ checkoutId: string; redirectUrl: string }> {
     this.logger.log(`Initiating checkout. Charger: ${chargerId}, Plan: ${tariffPlanId}`);
 
     const checkoutId = `pnx_tx_${Math.floor(Math.random() * 1000000)}`;
-    const redirectUrl = `https://www.paynamics.net/webpaymentservice/checkout/${checkoutId}/simulate-gateway`;
+    const checkoutBase = process.env.PAYNAMICS_CHECKOUT_URL || 'https://www.paynamics.net/webpaymentservice/checkout';
+    const redirectUrl = `${checkoutBase}/${checkoutId}`;
 
     // Save metadata in Redis for webhook validation
     const checkoutSession = { chargerId, connectorId, tariffPlanId, status: 'PENDING' };
@@ -204,7 +248,8 @@ export class ChargingService implements OnModuleInit {
       result = await this.ocppAdapter.remoteStart(chargerId, connectorId, rfidCardId);
     } catch (err) {
       this.logger.warn(`RemoteStart did not get a response from ${chargerId}: ${(err as Error).message}`);
-      this.clearStartWatchdog(chargerId);
+      this.chargeStartWatchdog.clear(chargerId);
+      this.clearSessionMetadata(chargerId);
       this.activeSessions.delete(chargerId);
       this.chargerToRfidMap.delete(chargerId);
       this.sessionEnergyMap.delete(chargerId);
@@ -219,7 +264,8 @@ export class ChargingService implements OnModuleInit {
 
     if (!result.success || result.status !== 'Accepted') {
       this.logger.warn(`OCPP CSMS rejected remote start: ${result.errorMessage || result.status}`);
-      this.clearStartWatchdog(chargerId);
+      this.chargeStartWatchdog.clear(chargerId);
+      this.clearSessionMetadata(chargerId);
       this.chargerToRfidMap.delete(chargerId);
       this.sessionEnergyMap.delete(chargerId);
       
@@ -234,7 +280,7 @@ export class ChargingService implements OnModuleInit {
     // Map active session to charger
     this.chargerToRfidMap.set(chargerId, rfidCardId);
     this.sessionEnergyMap.set(chargerId, 0.0);
-    this.activeSessions.add(chargerId);
+    this.trackSessionStart(chargerId, connectorId);
 
     this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.CHARGER_PREPARING, {
       chargerId,
@@ -242,7 +288,7 @@ export class ChargingService implements OnModuleInit {
       message: 'Remote start accepted. Please plug the cable into your vehicle.',
     });
 
-    this.armStartWatchdog(chargerId, connectorId);
+    this.armChargeStartWatchdog(chargerId, connectorId);
 
     return result;
   }
@@ -264,7 +310,8 @@ export class ChargingService implements OnModuleInit {
     } catch (err) {
       // The charger never answered the RemoteStartTransaction (offline/unresponsive).
       this.logger.warn(`RemoteStart did not get a response from ${chargerId}: ${(err as Error).message}`);
-      this.clearStartWatchdog(chargerId);
+      this.chargeStartWatchdog.clear(chargerId);
+      this.clearSessionMetadata(chargerId);
       this.activeSessions.delete(chargerId);
       this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.SESSION_ERROR, {
         chargerId,
@@ -276,7 +323,8 @@ export class ChargingService implements OnModuleInit {
 
     if (!result.success || result.status !== 'Accepted') {
       this.logger.warn(`OCPP CSMS rejected remote start: ${result.errorMessage || result.status}`);
-      this.clearStartWatchdog(chargerId);
+      this.chargeStartWatchdog.clear(chargerId);
+      this.clearSessionMetadata(chargerId);
       this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.SESSION_ERROR, {
         chargerId,
         connectorId,
@@ -286,61 +334,81 @@ export class ChargingService implements OnModuleInit {
     }
 
     // RemoteStart accepted. The charger moves to "Preparing" (driver needs to plug in cable)
-    this.activeSessions.add(chargerId);
+    this.trackSessionStart(chargerId, connectorId);
     this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.CHARGER_PREPARING, {
       chargerId,
       connectorId,
       message: 'Remote start accepted. Please plug the cable into your vehicle.',
     });
 
-    // Arm the "no vehicle" watchdog: if charging never actually begins (no EV
-    // plugged in), auto-cancel the session so the guest is not left waiting.
-    this.armStartWatchdog(chargerId, connectorId);
+    this.armChargeStartWatchdog(chargerId, connectorId);
 
     return result;
   }
 
-  /**
-   * Starts a one-shot timer that fails the session if the charger does not
-   * report an active charging transaction within `startTimeoutMs`.
-   */
-  private armStartWatchdog(chargerId: string, connectorId: number): void {
-    this.clearStartWatchdog(chargerId);
+  private trackSessionStart(chargerId: string, connectorId: number): void {
+    this.activeSessions.add(chargerId);
+    this.sessionConnectors.set(chargerId, connectorId);
+    this.sessionStartedAt.set(chargerId, new Date().toISOString());
+  }
 
-    const timer = setTimeout(() => {
-      this.startWatchdogs.delete(chargerId);
+  private clearSessionMetadata(chargerId: string): void {
+    this.sessionConnectors.delete(chargerId);
+    this.sessionStartedAt.delete(chargerId);
+  }
+
+  getActiveSessions(): TrackedSession[] {
+    return Array.from(this.activeSessions).map((chargerId) => ({
+      chargerId,
+      connectorId: this.sessionConnectors.get(chargerId) ?? 1,
+      startedAt: this.sessionStartedAt.get(chargerId) ?? new Date().toISOString(),
+    }));
+  }
+
+  async recoverStaleSession(chargerId: string, connectorId: number): Promise<void> {
+    this.chargeStartWatchdog.clear(chargerId);
+    this.chargerToRfidMap.delete(chargerId);
+    this.sessionEnergyMap.delete(chargerId);
+    this.clearSessionMetadata(chargerId);
+    this.activeSessions.delete(chargerId);
+
+    void Promise.resolve(this.ocppAdapter.cancelSession(chargerId)).catch(() => undefined);
+
+    this.watchdogEvents.add(
+      'stale_session',
+      chargerId,
+      'Recovered orphaned session after charger disconnect without StopTransaction',
+    );
+
+    this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.SESSION_ERROR, {
+      chargerId,
+      connectorId,
+      message: 'Session ended automatically because the charger disconnected unexpectedly.',
+    });
+  }
+
+  private armChargeStartWatchdog(chargerId: string, connectorId: number): void {
+    this.chargeStartWatchdog.arm({ chargerId, connectorId }, () => {
       this.chargerToRfidMap.delete(chargerId);
       this.sessionEnergyMap.delete(chargerId);
 
-      // If charging actually started, the watchdog would have been cleared.
-      // Reaching here means no vehicle ever began drawing power.
       if (!this.activeSessions.delete(chargerId)) return;
 
-      this.logger.warn(
-        `No charging transaction started for ${chargerId} within ${this.startTimeoutMs / 1000}s. Timing out the session.`
+      this.clearSessionMetadata(chargerId);
+      this.watchdogEvents.add(
+        'charge_start_timeout',
+        chargerId,
+        `No vehicle detected within ${this.chargeStartWatchdog.getTimeoutSeconds()} seconds`,
       );
 
-      // Best-effort cancel of the pending remote start on the charger.
-      void Promise.resolve(this.ocppAdapter.remoteStop(chargerId)).catch(() => undefined);
+      void Promise.resolve(this.ocppAdapter.cancelSession(chargerId)).catch(() => undefined);
 
       this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.SESSION_ERROR, {
         chargerId,
         connectorId,
-        message: `No vehicle detected within ${Math.round(
-          this.startTimeoutMs / 1000
-        )} seconds. Session cancelled. Please plug in your vehicle and try again.`,
+        message: `No vehicle detected within ${this.chargeStartWatchdog.getTimeoutSeconds()} seconds. Session cancelled. Please plug in your vehicle and try again.`,
       });
-    }, this.startTimeoutMs);
-
-    this.startWatchdogs.set(chargerId, timer);
-  }
-
-  private clearStartWatchdog(chargerId: string): void {
-    const timer = this.startWatchdogs.get(chargerId);
-    if (timer) {
-      clearTimeout(timer);
-      this.startWatchdogs.delete(chargerId);
-    }
+    });
   }
 
   /**
@@ -349,12 +417,18 @@ export class ChargingService implements OnModuleInit {
   async triggerRemoteStop(chargerId: string, transactionId?: number): Promise<OcppRemoteStopResult> {
     this.logger.log(`Stopping charger session: Charger: ${chargerId}, Tx: ${transactionId ?? 'active'}`);
 
-    const result = await this.ocppAdapter.remoteStop(chargerId, transactionId);
+    this.chargeStartWatchdog.clear(chargerId);
+
+    const result = transactionId != null
+      ? await this.ocppAdapter.remoteStop(chargerId, transactionId)
+      : await this.ocppAdapter.cancelSession(chargerId);
+
+    this.chargerToRfidMap.delete(chargerId);
+    this.sessionEnergyMap.delete(chargerId);
+    this.clearSessionMetadata(chargerId);
+    this.activeSessions.delete(chargerId);
 
     if (result.success) {
-      this.chargerToRfidMap.delete(chargerId);
-      this.sessionEnergyMap.delete(chargerId);
-
       this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.SESSION_COMPLETED, {
         chargerId,
         transactionId,
@@ -362,8 +436,20 @@ export class ChargingService implements OnModuleInit {
       });
     } else {
       this.logger.warn(`Remote stop failed for ${chargerId}: ${result.errorMessage || result.status}`);
+      // Still reset the kiosk UI when the operator cancels — the charger may
+      // already be idle even if OCPP did not acknowledge the abort command.
+      this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.SESSION_COMPLETED, {
+        chargerId,
+        transactionId,
+        message: result.errorMessage || 'Session cancelled from kiosk.',
+      });
     }
 
     return result;
+  }
+
+  getChargersStatus(chargerIds: string[]): ChargerConnectionInfo[] {
+    const adapter = this.ocppAdapter as SteveOcppAdapter;
+    return adapter.listChargerConnections(chargerIds);
   }
 }

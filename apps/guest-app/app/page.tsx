@@ -46,6 +46,7 @@ function GuestAppContent() {
   const [connectorId, setConnectorId] = useState(0);
   const [accessToken, setAccessToken] = useState('');
   const [checkoutId, setCheckoutId] = useState('');
+  const [redirectUrl, setRedirectUrl] = useState('');
   const [statusMessage, setStatusMessage] = useState('Validating Charger Link...');
   const [telemetry, setTelemetry] = useState<MeterUpdate | null>(null);
 
@@ -108,30 +109,12 @@ function GuestAppContent() {
       });
       const data = await response.json();
       setCheckoutId(data.checkoutId);
+      setRedirectUrl(data.redirectUrl || '');
       setStep('PAYING');
-      setStatusMessage('Simulating Paynamics Gateway');
+      setStatusMessage('Complete payment to start charging.');
     } catch {
       setStep('ERROR');
       setStatusMessage('Failed to create payment checkout.');
-    }
-  };
-
-  const triggerMockPaymentWebhook = async () => {
-    try {
-      setStatusMessage('Submitting payment notification...');
-      const payload = { id: checkoutId, status: 'PAYMENT_SUCCESS', metadata: { chargerId, connectorId } };
-
-      const response = await fetch(`${backendUrl}/api/v1/payments/paynamics-webhook`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-paynamics-signature': 'mock_sha256_sig_valid_matching_secret_hmac' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) throw new Error('Notification process failed.');
-      setStatusMessage('Payment confirmed. Waiting for charging sequence...');
-    } catch {
-      setStep('ERROR');
-      setStatusMessage('Paynamics notification simulation failed.');
     }
   };
 
@@ -198,10 +181,14 @@ function GuestAppContent() {
           <div style={styles.card}>
             <h1 style={styles.title}>Paynamics Checkout</h1>
             <p style={styles.subtitle}>Reference: {checkoutId}</p>
-            <p style={styles.infoText}>Click below to simulate a successful Paynamics payment notification.</p>
-            <button style={styles.payBtn} onClick={triggerMockPaymentWebhook}>
-              Simulate Payment Success (Paynamics)
-            </button>
+            <p style={styles.infoText}>Complete payment through the Paynamics gateway. Charging will start automatically after payment is confirmed.</p>
+            {redirectUrl ? (
+              <a href={redirectUrl} target="_blank" rel="noopener noreferrer" style={styles.payBtn}>
+                Continue to Payment
+              </a>
+            ) : (
+              <p style={styles.infoText}>Waiting for payment gateway URL...</p>
+            )}
           </div>
         )}
 

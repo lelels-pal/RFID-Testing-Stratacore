@@ -2,7 +2,16 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { RfidCard, WsMeterUpdatePayload } from '@packages/shared';
+import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload } from '@packages/shared';
+import {
+  getChargerConfigs,
+  STATION_NAME,
+  STATION_LOCATION,
+  validateKioskLogin,
+  isKioskAuthConfigured,
+} from '../lib/config';
+
+const CHARGER_CONFIGS = getChargerConfigs();
 
 const WsEvents = {
   SESSION_CLAIMED: 'session:claimed',
@@ -12,10 +21,11 @@ const WsEvents = {
   METER_UPDATE: 'charger:meter_update',
   SESSION_COMPLETED: 'session:completed',
   SESSION_ERROR: 'session:error',
+  RFID_AUTH_DENIED: 'rfid:auth_denied',
   SUBSCRIBE_CHARGER: 'subscribe:charger',
 };
 
-type ViewTab = 'dashboard' | 'chargepoints' | 'energy' | 'finance' | 'operators' | 'history' | 'topup' | 'settings';
+type ViewTab = 'dashboard' | 'chargepoints' | 'topup';
 
 interface ChargerDefinition {
   chargerId: string;
@@ -29,11 +39,6 @@ interface LocalSessionState {
   telemetry: WsMeterUpdatePayload | null;
   activeRfid: string | null;
 }
-
-const CHARGER_CONFIGS: ChargerDefinition[] = [
-  { chargerId: 'BENY-002', connectorId: 1, chargerIp: '192.168.254.85' },
-  { chargerId: 'BENY-001', connectorId: 1, chargerIp: '192.168.254.62' },
-];
 
 function getBackendUrl() {
   if (process.env.NEXT_PUBLIC_BACKEND_URL) return process.env.NEXT_PUBLIC_BACKEND_URL;
@@ -54,6 +59,18 @@ function formatResetLabel(): string {
 
 function isCardExhausted(card: RfidCard): boolean {
   return card.currentMonthKwhConsumed >= card.monthlyKwhLimit;
+}
+
+function getSessionDotColor(status: LocalSessionState['status']): string {
+  if (status === 'CHARGING') return '#3b82f6';
+  if (status === 'PREPARING') return '#f59e0b';
+  if (status === 'ERROR') return '#ef4444';
+  return '#10b981';
+}
+
+function getBayLabel(charger: ChargerDefinition, index: number): string {
+  if (charger.chargerId === 'DELTA123') return `DELTA123 (${charger.chargerIp})`;
+  return `Bay A${index} (${charger.chargerId})`;
 }
 
 export default function AdminDashboardPage() {
@@ -96,6 +113,9 @@ export default function AdminDashboardPage() {
   const [selectedChargerId, setSelectedChargerId] = useState<string | null>(null);
   const [selectedRfid, setSelectedRfid] = useState('');
   const [activationError, setActivationError] = useState('');
+  const [chargerConnections, setChargerConnections] = useState<Record<string, ChargerConnectionInfo>>({});
+  const [rfidAlerts, setRfidAlerts] = useState<WsRfidAuthDeniedPayload[]>([]);
+  const [rfidDeniedModal, setRfidDeniedModal] = useState<WsRfidAuthDeniedPayload | null>(null);
 
   // Socket reference
   const socketRef = useRef<Socket | null>(null);
@@ -117,12 +137,31 @@ export default function AdminDashboardPage() {
     }
   };
 
+  const fetchChargerConnections = async () => {
+    try {
+      const ids = CHARGER_CONFIGS.map((c) => c.chargerId).join(',');
+      const res = await fetch(`${backendUrl}/api/v1/charging/chargers?ids=${encodeURIComponent(ids)}`);
+      if (!res.ok) throw new Error('Failed to fetch charger status');
+      const data: ChargerConnectionInfo[] = await res.json();
+      setChargerConnections(Object.fromEntries(data.map((c) => [c.chargerId, c])));
+    } catch (err) {
+      console.error('Error fetching charger connections:', err);
+    }
+  };
+
   // Triggered when backend is resolved or on interval. Polls frequently so a
   // card's monthly consumption visibly counts up while a session is charging.
   useEffect(() => {
     if (!backendUrl) return;
     fetchRfids();
     const interval = setInterval(fetchRfids, 3000);
+    return () => clearInterval(interval);
+  }, [backendUrl]);
+
+  useEffect(() => {
+    if (!backendUrl) return;
+    fetchChargerConnections();
+    const interval = setInterval(fetchChargerConnections, 5000);
     return () => clearInterval(interval);
   }, [backendUrl]);
 
@@ -221,6 +260,11 @@ export default function AdminDashboardPage() {
       }, 6000);
     });
 
+    socket.on(WsEvents.RFID_AUTH_DENIED, (data: WsRfidAuthDeniedPayload) => {
+      setRfidAlerts((prev) => [data, ...prev].slice(0, 20));
+      setRfidDeniedModal(data);
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -229,15 +273,27 @@ export default function AdminDashboardPage() {
   // Sign In Handler
   const handleSignIn = (e: React.FormEvent) => {
     e.preventDefault();
-    if (username.trim() === 'admin' && password === 'admin123') {
-      setIsLoggedIn(true);
-      setLoginError('');
-    } else if (username.trim() === 'user' && password === 'user123') {
+    if (!isKioskAuthConfigured()) {
+      setLoginError('Kiosk login is not configured. Set NEXT_PUBLIC_KIOSK_USERNAME and NEXT_PUBLIC_KIOSK_PASSWORD.');
+      return;
+    }
+    if (validateKioskLogin(username, password)) {
       setIsLoggedIn(true);
       setLoginError('');
     } else {
       setLoginError('Invalid username or password. Please try again.');
     }
+  };
+
+  const handleDismissRfidAlert = () => {
+    setRfidDeniedModal(null);
+  };
+
+  const handleRegisterFromRfidAlert = () => {
+    if (!rfidDeniedModal) return;
+    setNewCardId(rfidDeniedModal.rfidCardId);
+    setCurrentTab('topup');
+    setRfidDeniedModal(null);
   };
 
   // Start Charging Handler
@@ -286,9 +342,23 @@ export default function AdminDashboardPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chargerId }),
       });
-      if (!res.ok) throw new Error('Stop command rejected');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Stop command rejected');
+
+      setSessions((prev) => ({
+        ...prev,
+        [chargerId]: {
+          status: 'IDLE',
+          statusMessage: 'Ready to Charge',
+          telemetry: null,
+          activeRfid: null,
+        },
+      }));
+      setSelectedChargerId(null);
+      setSelectedRfid('');
     } catch (err) {
       console.error('Error stopping charger:', err);
+      setActivationError((err as Error).message);
     }
   };
 
@@ -417,7 +487,27 @@ export default function AdminDashboardPage() {
   // Helper Stats calculations
   const totalKwhConsumedThisMonth = rfidCards.reduce((acc, c) => acc + c.currentMonthKwhConsumed, 0);
   const activeSessionsCount = Object.values(sessions).filter((s) => s.status === 'CHARGING' || s.status === 'PREPARING').length;
-  const criticalAlertsCount = Object.values(sessions).filter((s) => s.status === 'ERROR').length + (rfidCards.filter(c => c.currentMonthKwhConsumed >= c.monthlyKwhLimit).length > 0 ? 1 : 0);
+  const onlineChargersCount = CHARGER_CONFIGS.filter((c) => chargerConnections[c.chargerId]?.connected).length;
+  const criticalAlertsCount = Object.values(sessions).filter((s) => s.status === 'ERROR').length
+    + CHARGER_CONFIGS.filter((c) => !chargerConnections[c.chargerId]?.connected).length
+    + rfidAlerts.length;
+  const liveSessionRows = CHARGER_CONFIGS.filter((c) => sessions[c.chargerId]?.status !== 'IDLE');
+  const hasLiveSessions = liveSessionRows.length > 0;
+  const hasLiveAlerts = Object.entries(sessions).some(([, s]) => s.status === 'ERROR')
+    || CHARGER_CONFIGS.some((c) => !chargerConnections[c.chargerId]?.connected)
+    || rfidAlerts.length > 0;
+  const healthHealthy = CHARGER_CONFIGS.filter((c) => {
+    const conn = chargerConnections[c.chargerId];
+    return conn?.connected && conn.status !== 'Faulted' && sessions[c.chargerId]?.status !== 'ERROR';
+  }).length;
+  const healthCritical = CHARGER_CONFIGS.filter((c) => {
+    const conn = chargerConnections[c.chargerId];
+    return !conn?.connected || conn.status === 'Faulted' || sessions[c.chargerId]?.status === 'ERROR';
+  }).length;
+  const healthWarning = Math.max(0, CHARGER_CONFIGS.length - healthHealthy - healthCritical);
+  const onlinePct = CHARGER_CONFIGS.length > 0
+    ? Math.round((onlineChargersCount / CHARGER_CONFIGS.length) * 100)
+    : 0;
 
   // ═══════════════════════════════════════════════════════════════
   // LOGIN VIEW RENDER
@@ -507,21 +597,6 @@ export default function AdminDashboardPage() {
               Sign In <span style={{ marginLeft: 8 }}>→</span>
             </button>
           </form>
-
-          {/* Demo Credentials Section */}
-          <div style={loginStyles.demoBox}>
-            <div style={loginStyles.demoHeader}>
-              <span style={loginStyles.demoLine} />
-              <span style={loginStyles.demoHeaderText}>Demo Credentials</span>
-              <span style={loginStyles.demoLine} />
-            </div>
-            <div style={loginStyles.demoRow}>
-              <strong>Admin:</strong> <span style={loginStyles.purpleText}>admin</span> / <span style={loginStyles.purpleText}>admin123</span>
-            </div>
-            <div style={loginStyles.demoRow}>
-              <strong>Guest:</strong> <span style={loginStyles.purpleText}>user</span> / <span style={loginStyles.purpleText}>user123</span>
-            </div>
-          </div>
         </div>
       </div>
     );
@@ -547,10 +622,6 @@ export default function AdminDashboardPage() {
           {[
             { id: 'dashboard', label: 'Dashboard', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z' },
             { id: 'chargepoints', label: 'Chargepoints', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
-            { id: 'energy', label: 'Energy', icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
-            { id: 'finance', label: 'Finance', icon: 'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z' },
-            { id: 'operators', label: 'Operators', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
-            { id: 'history', label: 'History', icon: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z' },
             { id: 'topup', label: 'Top-Up', icon: 'M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z' },
           ].map((item) => {
             const isActive = currentTab === item.id;
@@ -581,14 +652,7 @@ export default function AdminDashboardPage() {
         </nav>
 
         <div style={dashStyles.sidebarFooter}>
-          <button onClick={() => setCurrentTab('settings')} style={{ ...dashStyles.navItem, color: '#94a3b8' }}>
-            <svg style={dashStyles.navIcon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            Settings
-          </button>
-          <button onClick={() => setIsLoggedIn(false)} style={{ ...dashStyles.navItem, color: '#f87171', marginTop: 12 }}>
+          <button onClick={() => setIsLoggedIn(false)} style={{ ...dashStyles.navItem, color: '#f87171' }}>
             <svg style={dashStyles.navIcon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
             </svg>
@@ -612,12 +676,7 @@ export default function AdminDashboardPage() {
             <h2 style={dashStyles.headerTitle}>
               {currentTab === 'dashboard' && 'Dashboard'}
               {currentTab === 'chargepoints' && 'Charge Points'}
-              {currentTab === 'energy' && 'Energy Analytics'}
-              {currentTab === 'finance' && 'Finance Reports'}
-              {currentTab === 'operators' && 'Operators Management'}
-              {currentTab === 'history' && 'Transaction History'}
               {currentTab === 'topup' && 'RFID Top-Up Allocation'}
-              {currentTab === 'settings' && 'System Settings'}
             </h2>
           </div>
 
@@ -630,10 +689,10 @@ export default function AdminDashboardPage() {
             </button>
 
             <div style={dashStyles.profilePill}>
-              <div style={dashStyles.avatarCircle}>A</div>
+              <div style={dashStyles.avatarCircle}>{username.charAt(0).toUpperCase() || 'O'}</div>
               <div style={dashStyles.profileTextGroup}>
-                <div style={dashStyles.profileName}>Admin</div>
-                <div style={dashStyles.profileRole}>Super Admin</div>
+                <div style={dashStyles.profileName}>{username || 'Operator'}</div>
+                <div style={dashStyles.profileRole}>Station Operator</div>
               </div>
               <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ marginLeft: 6 }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
@@ -660,9 +719,11 @@ export default function AdminDashboardPage() {
                     <span style={{ ...dashStyles.metricIconWrapper, backgroundColor: '#d1fae5', color: '#10b981' }}>🔌</span>
                   </div>
                   <div style={dashStyles.metricValue}>
-                    {CHARGER_CONFIGS.length} / {CHARGER_CONFIGS.length}
+                    {onlineChargersCount} / {CHARGER_CONFIGS.length}
                   </div>
-                  <div style={{ ...dashStyles.metricSubtext, color: '#10b981' }}>100% online</div>
+                  <div style={{ ...dashStyles.metricSubtext, color: onlinePct === 100 ? '#10b981' : '#f59e0b' }}>
+                    {onlinePct}% online
+                  </div>
                 </div>
 
                 {/* 2. ACTIVE SESSIONS */}
@@ -708,52 +769,17 @@ export default function AdminDashboardPage() {
                   <div style={dashStyles.panelCard}>
                     <div style={dashStyles.panelHeader}>
                       <h3 style={dashStyles.panelTitle}>ENERGY CONSUMPTION (KWH)</h3>
-                      <div style={dashStyles.tabButtonGroup}>
-                        <button style={dashStyles.tabBtnActive}>Day</button>
-                        <button style={dashStyles.tabBtn}>Week</button>
-                        <button style={dashStyles.tabBtn}>Month</button>
-                      </div>
                     </div>
                     
-                    {/* SVG GRAPH RENDERING */}
                     <div style={dashStyles.graphContainer}>
-                      <svg width="100%" height="220" viewBox="0 0 600 220" preserveAspectRatio="none">
-                        <defs>
-                          <linearGradient id="purpleGrad" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="#a78bfa" stopOpacity="0.4"/>
-                            <stop offset="100%" stopColor="#c084fc" stopOpacity="0.0"/>
-                          </linearGradient>
-                        </defs>
-                        {/* Horizontal Grid lines */}
-                        <line x1="0" y1="40" x2="600" y2="40" stroke="#f1f5f9" strokeWidth="1"/>
-                        <line x1="0" y1="90" x2="600" y2="90" stroke="#f1f5f9" strokeWidth="1"/>
-                        <line x1="0" y1="140" x2="600" y2="140" stroke="#f1f5f9" strokeWidth="1"/>
-                        <line x1="0" y1="190" x2="600" y2="190" stroke="#cbd5e1" strokeWidth="1.5"/>
-
-                        {/* Smooth Bezier Path for Graph Line */}
-                        <path
-                          d="M 0 160 Q 50 120 100 130 T 200 100 T 300 120 T 400 80 T 500 60 T 600 100 L 600 190 L 0 190 Z"
-                          fill="url(#purpleGrad)"
-                        />
-                        <path
-                          d="M 0 160 Q 50 120 100 130 T 200 100 T 300 120 T 400 80 T 500 60 T 600 100"
-                          fill="none"
-                          stroke="#7c3aed"
-                          strokeWidth="3.5"
-                        />
-
-                        {/* Data point dots */}
-                        <circle cx="400" cy="80" r="5" fill="#7c3aed" stroke="#ffffff" strokeWidth="1.5"/>
-                        <circle cx="500" cy="60" r="5" fill="#7c3aed" stroke="#ffffff" strokeWidth="1.5"/>
-                      </svg>
-                      <div style={dashStyles.graphLabels}>
-                        <span>00:00</span>
-                        <span>04:00</span>
-                        <span>08:00</span>
-                        <span>12:00</span>
-                        <span>16:00</span>
-                        <span>20:00</span>
-                        <span>24:00</span>
+                      <div style={{ padding: '48px 24px', textAlign: 'center', color: '#64748b' }}>
+                        <div style={{ fontSize: 28, fontWeight: 700, color: '#7c3aed', marginBottom: 8 }}>
+                          {totalKwhConsumedThisMonth.toFixed(2)} kWh
+                        </div>
+                        <div style={{ fontSize: 13 }}>Total RFID allocation consumed this month</div>
+                        <div style={{ fontSize: 12, marginTop: 8, color: '#94a3b8' }}>
+                          {rfidCards.length} registered card{rfidCards.length === 1 ? '' : 's'}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -824,67 +850,13 @@ export default function AdminDashboardPage() {
                             );
                           })}
 
-                          {/* Mock Sessions for display to match screenshot */}
-                          <tr style={dashStyles.tableBodyRow}>
-                            <td style={dashStyles.tableBodyCell}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                <div style={{ ...dashStyles.userAvatar, backgroundColor: '#10b981' }}>JS</div>
-                                <div>
-                                  <div style={dashStyles.userName}>John Smith</div>
-                                  <div style={dashStyles.userSub}>RFID-8812</div>
-                                </div>
-                              </div>
-                            </td>
-                            <td style={dashStyles.tableBodyCell}>EV-001</td>
-                            <td style={dashStyles.tableBodyCell}>01:24:15</td>
-                            <td style={dashStyles.tableBodyCell}>23.4 kWh</td>
-                            <td style={dashStyles.tableBodyCell}>50 kW</td>
-                            <td style={dashStyles.tableBodyCell}>
-                              <span style={{ ...dashStyles.statusPill, backgroundColor: '#d1fae5', color: '#065f46' }}>
-                                ● Charging
-                              </span>
-                            </td>
-                          </tr>
-                          <tr style={dashStyles.tableBodyRow}>
-                            <td style={dashStyles.tableBodyCell}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                <div style={{ ...dashStyles.userAvatar, backgroundColor: '#fbbf24' }}>SC</div>
-                                <div>
-                                  <div style={dashStyles.userName}>Sarah Cruz</div>
-                                  <div style={dashStyles.userSub}>RFID-5412</div>
-                                </div>
-                              </div>
-                            </td>
-                            <td style={dashStyles.tableBodyCell}>EV-008</td>
-                            <td style={dashStyles.tableBodyCell}>00:58:42</td>
-                            <td style={dashStyles.tableBodyCell}>17.8 kWh</td>
-                            <td style={dashStyles.tableBodyCell}>50 kW</td>
-                            <td style={dashStyles.tableBodyCell}>
-                              <span style={{ ...dashStyles.statusPill, backgroundColor: '#d1fae5', color: '#065f46' }}>
-                                ● Charging
-                              </span>
-                            </td>
-                          </tr>
-                          <tr style={dashStyles.tableBodyRow}>
-                            <td style={dashStyles.tableBodyCell}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                <div style={{ ...dashStyles.userAvatar, backgroundColor: '#ec4899' }}>MD</div>
-                                <div>
-                                  <div style={dashStyles.userName}>Mike Davis</div>
-                                  <div style={dashStyles.userSub}>RFID-3211</div>
-                                </div>
-                              </div>
-                            </td>
-                            <td style={dashStyles.tableBodyCell}>EV-003</td>
-                            <td style={dashStyles.tableBodyCell}>02:11:06</td>
-                            <td style={dashStyles.tableBodyCell}>46.5 kWh</td>
-                            <td style={dashStyles.tableBodyCell}>100 kW</td>
-                            <td style={dashStyles.tableBodyCell}>
-                              <span style={{ ...dashStyles.statusPill, backgroundColor: '#d1fae5', color: '#065f46' }}>
-                                ● Charging
-                              </span>
-                            </td>
-                          </tr>
+                          {!hasLiveSessions && (
+                            <tr>
+                              <td colSpan={6} style={{ ...dashStyles.tableBodyCell, textAlign: 'center', color: '#94a3b8', padding: 32 }}>
+                                No active charging sessions
+                              </td>
+                            </tr>
+                          )}
                         </tbody>
                       </table>
                     </div>
@@ -915,29 +887,46 @@ export default function AdminDashboardPage() {
                         );
                       })}
 
-                      <div style={dashStyles.alertItem}>
-                        <div style={dashStyles.alertHeader}>
-                          <span style={dashStyles.alertTitle}>EV-003 Offline</span>
-                          <span style={dashStyles.alertTime}>2m ago</span>
+                      {rfidAlerts.map((alert, index) => (
+                        <div
+                          key={`${alert.chargerId}-${alert.rfidCardId}-${alert.timestamp}-${index}`}
+                          style={{
+                            ...dashStyles.alertItem,
+                            borderLeft: `4px solid ${alert.reason === 'Invalid' ? '#f97316' : '#ef4444'}`,
+                          }}
+                        >
+                          <div style={dashStyles.alertHeader}>
+                            <span style={{
+                              ...dashStyles.alertTitle,
+                              color: alert.reason === 'Invalid' ? '#f97316' : '#ef4444',
+                            }}>
+                              {alert.reason === 'Invalid' ? 'Unregistered RFID' : 'RFID Denied'} · {alert.chargerId}
+                            </span>
+                            <span style={dashStyles.alertTime}>
+                              {new Date(alert.timestamp).toLocaleTimeString()}
+                            </span>
+                          </div>
+                          <div style={dashStyles.alertBody}>
+                            <strong>{alert.rfidCardId}</strong> — {alert.message}
+                          </div>
                         </div>
-                        <div style={dashStyles.alertBody}>Charger not responding to central system heartbeat.</div>
-                      </div>
+                      ))}
 
-                      <div style={{ ...dashStyles.alertItem, borderLeft: '4px solid #f97316' }}>
-                        <div style={dashStyles.alertHeader}>
-                          <span style={{ ...dashStyles.alertTitle, color: '#f97316' }}>EV-011 High Temperature</span>
-                          <span style={dashStyles.alertTime}>10m ago</span>
+                      {CHARGER_CONFIGS.filter((c) => !chargerConnections[c.chargerId]?.connected).map((charger) => (
+                        <div key={charger.chargerId} style={{ ...dashStyles.alertItem, borderLeft: '4px solid #ef4444' }}>
+                          <div style={dashStyles.alertHeader}>
+                            <span style={{ ...dashStyles.alertTitle, color: '#ef4444' }}>{charger.chargerId} Offline</span>
+                            <span style={dashStyles.alertTime}>Now</span>
+                          </div>
+                          <div style={dashStyles.alertBody}>Charger not connected to the OCPP central system.</div>
                         </div>
-                        <div style={dashStyles.alertBody}>Internal thermometer registers 78°C. Temperature above threshold.</div>
-                      </div>
+                      ))}
 
-                      <div style={dashStyles.alertItem}>
-                        <div style={dashStyles.alertHeader}>
-                          <span style={dashStyles.alertTitle}>Communication Timeout</span>
-                          <span style={dashStyles.alertTime}>25m ago</span>
+                      {!hasLiveAlerts && (
+                        <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+                          No alerts — all chargers connected
                         </div>
-                        <div style={dashStyles.alertBody}>EV-015 connection lost during BootNotification handshake.</div>
-                      </div>
+                      )}
                     </div>
                   </div>
 
@@ -946,19 +935,9 @@ export default function AdminDashboardPage() {
                     <h3 style={dashStyles.panelTitle}>CHARGER HEALTH STATUS</h3>
                     
                     <div style={dashStyles.healthLayout}>
-                      {/* SVG Donut Chart */}
                       <div style={dashStyles.donutWrapper}>
-                        <svg width="120" height="120" viewBox="0 0 120 120">
-                          {/* Total 30 circle segments */}
-                          {/* Segment 1: Healthy (87% - Green) */}
-                          <circle cx="60" cy="60" r="45" fill="transparent" stroke="#10b981" strokeWidth="15" strokeDasharray="282" strokeDashoffset="36" />
-                          {/* Segment 2: Warning (10% - Orange) */}
-                          <circle cx="60" cy="60" r="45" fill="transparent" stroke="#f59e0b" strokeWidth="15" strokeDasharray="282" strokeDashoffset="0" transform="rotate(-45 60 60)" />
-                          {/* Segment 3: Critical (3% - Purple) */}
-                          <circle cx="60" cy="60" r="45" fill="transparent" stroke="#8b5cf6" strokeWidth="15" strokeDasharray="282" strokeDashoffset="260" transform="rotate(220 60 60)" />
-                        </svg>
                         <div style={dashStyles.donutText}>
-                          <div style={dashStyles.donutNumber}>30</div>
+                          <div style={dashStyles.donutNumber}>{CHARGER_CONFIGS.length}</div>
                           <div style={dashStyles.donutLabel}>Total</div>
                         </div>
                       </div>
@@ -967,20 +946,17 @@ export default function AdminDashboardPage() {
                         <div style={dashStyles.legendItem}>
                           <span style={{ ...dashStyles.legendDot, backgroundColor: '#10b981' }} />
                           <span style={dashStyles.legendLabel}>Healthy</span>
-                          <span style={dashStyles.legendValue}>26 (87%)</span>
+                          <span style={dashStyles.legendValue}>{healthHealthy}</span>
                         </div>
                         <div style={dashStyles.legendItem}>
                           <span style={{ ...dashStyles.legendDot, backgroundColor: '#f59e0b' }} />
                           <span style={dashStyles.legendLabel}>Warning</span>
-                          <span style={dashStyles.legendValue}>3 (10%)</span>
+                          <span style={dashStyles.legendValue}>{healthWarning}</span>
                         </div>
                         <div style={dashStyles.legendItem}>
-                          <span style={{ ...dashStyles.legendDot, backgroundColor: '#8b5cf6' }} />
+                          <span style={{ ...dashStyles.legendDot, backgroundColor: '#ef4444' }} />
                           <span style={dashStyles.legendLabel}>Critical</span>
-                          <span style={dashStyles.legendValue}>1 (3%)</span>
-                        </div>
-                        <div style={dashStyles.viewDetailsLink}>
-                          View details <span style={{ marginLeft: 4 }}>→</span>
+                          <span style={dashStyles.legendValue}>{healthCritical}</span>
                         </div>
                       </div>
                     </div>
@@ -996,337 +972,86 @@ export default function AdminDashboardPage() {
               ─────────────────────────────────────────────────────── */}
           {currentTab === 'chargepoints' && (
             <div style={dashStyles.viewContainer}>
-              <div style={cpStyles.searchHeader}>
-                <div style={cpStyles.searchInputGroup}>
-                  <svg style={cpStyles.searchIcon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
-                  <input type="text" placeholder="Search station or location..." style={cpStyles.searchInput} />
-                </div>
-                <div style={{ display: 'flex', gap: 12 }}>
-                  <select style={cpStyles.selectFilter}>
-                    <option>All statuses</option>
-                    <option>Online</option>
-                    <option>Maintenance</option>
-                  </select>
-                  <button onClick={() => setCurrentTab('topup')} style={cpStyles.addStationBtn}>
-                    + Add Station
-                  </button>
-                </div>
+              <div style={{ ...cpStyles.searchHeader, justifyContent: 'flex-end' }}>
+                <button onClick={() => setCurrentTab('topup')} style={cpStyles.addStationBtn}>
+                  + Register RFID Card
+                </button>
               </div>
 
               {/* STATIONS GRID */}
               <div style={cpStyles.stationsGrid}>
-                
-                {/* 1. MINE SITE DEPOT (OUR ACTIVE CHARGERS) */}
                 <div style={cpStyles.stationCard}>
                   <div style={cpStyles.stationHeader}>
                     <div>
                       <h4 style={cpStyles.stationName}>
-                        Mine Site Depot <span style={cpStyles.onlineBadge}>Online</span>
+                        {STATION_NAME}{' '}
+                        <span style={onlineChargersCount === CHARGER_CONFIGS.length ? cpStyles.onlineBadge : cpStyles.offlineBadge}>
+                          {onlineChargersCount === CHARGER_CONFIGS.length ? 'Online' : `${onlineChargersCount}/${CHARGER_CONFIGS.length} Online`}
+                        </span>
                       </h4>
-                      <p style={cpStyles.stationLoc}>📍 Semirara Island Operations</p>
+                      {STATION_LOCATION && <p style={cpStyles.stationLoc}>📍 {STATION_LOCATION}</p>}
                     </div>
-                    <button style={cpStyles.stationConfigBtn}>⚙️</button>
                   </div>
 
                   <div style={cpStyles.stationMetaRow}>
                     <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>5/12</span>
-                      <span style={cpStyles.metaBoxLbl}>Slots</span>
+                      <span style={cpStyles.metaBoxVal}>{activeSessionsCount}/{CHARGER_CONFIGS.length}</span>
+                      <span style={cpStyles.metaBoxLbl}>Active</span>
                     </div>
                     <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>1,840 kWh</span>
+                      <span style={cpStyles.metaBoxVal}>{totalKwhConsumedThisMonth.toFixed(1)} kWh</span>
                       <span style={cpStyles.metaBoxLbl}>Consumed</span>
                     </div>
                     <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>68%</span>
-                      <span style={cpStyles.metaBoxLbl}>Util.</span>
+                      <span style={cpStyles.metaBoxVal}>{onlinePct}%</span>
+                      <span style={cpStyles.metaBoxLbl}>Online</span>
                     </div>
                     <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>6 units</span>
+                      <span style={cpStyles.metaBoxVal}>{CHARGER_CONFIGS.length}</span>
                       <span style={cpStyles.metaBoxLbl}>Chargers</span>
                     </div>
                   </div>
 
-                  {/* BAYS LIST */}
                   <div style={cpStyles.baysList}>
-                    {/* BAY A1 - Live (Mapped to BENY-002) */}
-                    <div
-                      onClick={() => setSelectedChargerId('BENY-002')}
-                      style={{
-                        ...cpStyles.bayItem,
-                        ...(sessions['BENY-002'].status !== 'IDLE' ? cpStyles.bayItemActive : {}),
-                      }}
-                    >
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot(
-                          sessions['BENY-002'].status === 'CHARGING' ? '#3b82f6' : 
-                          sessions['BENY-002'].status === 'PREPARING' ? '#f59e0b' : 
-                          sessions['BENY-002'].status === 'ERROR' ? '#ef4444' : '#10b981'
-                        )} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay A1 (BENY-002)</div>
-                          <div style={cpStyles.bayStatus}>
-                            {sessions['BENY-002'].status} - {sessions['BENY-002'].statusMessage}
+                    {CHARGER_CONFIGS.map((charger, index) => {
+                      const session = sessions[charger.chargerId];
+                      const connection = chargerConnections[charger.chargerId];
+                      const isOnline = connection?.connected ?? false;
+
+                      return (
+                        <div
+                          key={charger.chargerId}
+                          onClick={() => setSelectedChargerId(charger.chargerId)}
+                          style={{
+                            ...cpStyles.bayItem,
+                            ...(session.status !== 'IDLE' ? cpStyles.bayItemActive : {}),
+                          }}
+                        >
+                          <div style={cpStyles.bayLeft}>
+                            <div style={cpStyles.bayDot(getSessionDotColor(session.status))} />
+                            <div>
+                              <div style={cpStyles.bayName}>
+                                {getBayLabel(charger, index + 1)}{' '}
+                                <span style={isOnline ? cpStyles.onlineBadge : cpStyles.offlineBadge}>
+                                  {isOnline ? 'Online' : 'Offline'}
+                                </span>
+                              </div>
+                              <div style={cpStyles.bayStatus}>
+                                {session.status} - {session.statusMessage}
+                                {connection?.status && isOnline ? ` (${connection.status})` : ''}
+                              </div>
+                            </div>
+                          </div>
+                          <div style={cpStyles.bayUsage}>
+                            {session.telemetry
+                              ? `${session.telemetry.energyDeliveredKwh.toFixed(2)} kWh`
+                              : isOnline ? 'Tap to control' : 'Offline'}
                           </div>
                         </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>
-                        {sessions['BENY-002'].telemetry 
-                          ? `${sessions['BENY-002'].telemetry.energyDeliveredKwh.toFixed(2)} kWh today`
-                          : 'Interactive'}
-                      </div>
-                    </div>
-
-                    {/* BAY A2 - Live (Mapped to BENY-001) */}
-                    <div
-                      onClick={() => setSelectedChargerId('BENY-001')}
-                      style={{
-                        ...cpStyles.bayItem,
-                        ...(sessions['BENY-001'].status !== 'IDLE' ? cpStyles.bayItemActive : {}),
-                      }}
-                    >
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot(
-                          sessions['BENY-001'].status === 'CHARGING' ? '#3b82f6' : 
-                          sessions['BENY-001'].status === 'PREPARING' ? '#f59e0b' : 
-                          sessions['BENY-001'].status === 'ERROR' ? '#ef4444' : '#10b981'
-                        )} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay A2 (BENY-001)</div>
-                          <div style={cpStyles.bayStatus}>
-                            {sessions['BENY-001'].status} - {sessions['BENY-001'].statusMessage}
-                          </div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>
-                        {sessions['BENY-001'].telemetry 
-                          ? `${sessions['BENY-001'].telemetry.energyDeliveredKwh.toFixed(2)} kWh today`
-                          : 'Interactive'}
-                      </div>
-                    </div>
-
-                    {/* MOCK STATIC BAYS TO COMPLETE LOOK */}
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#f59e0b')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay A3</div>
-                          <div style={cpStyles.bayStatus}>Preparing</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>18 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#10b981')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay A4</div>
-                          <div style={cpStyles.bayStatus}>Available</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>41 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#ef4444')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay A5</div>
-                          <div style={cpStyles.bayStatus}>Faulted</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>0 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#3b82f6')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay A6</div>
-                          <div style={cpStyles.bayStatus}>Charging</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>57 kWh today</div>
-                    </div>
-
+                      );
+                    })}
                   </div>
-                  <div style={cpStyles.stationFooter}>View all bays →</div>
                 </div>
-
-                {/* 2. POWER PLANT HUB */}
-                <div style={cpStyles.stationCard}>
-                  <div style={cpStyles.stationHeader}>
-                    <div>
-                      <h4 style={cpStyles.stationName}>
-                        Power Plant Hub <span style={cpStyles.onlineBadge}>Online</span>
-                      </h4>
-                      <p style={cpStyles.stationLoc}>📍 Power Generation Complex</p>
-                    </div>
-                    <button style={cpStyles.stationConfigBtn}>⚙️</button>
-                  </div>
-
-                  <div style={cpStyles.stationMetaRow}>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>3/10</span>
-                      <span style={cpStyles.metaBoxLbl}>Slots</span>
-                    </div>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>1,495 kWh</span>
-                      <span style={cpStyles.metaBoxLbl}>Consumed</span>
-                    </div>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>74%</span>
-                      <span style={cpStyles.metaBoxLbl}>Util.</span>
-                    </div>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>5 units</span>
-                      <span style={cpStyles.metaBoxLbl}>Chargers</span>
-                    </div>
-                  </div>
-
-                  {/* BAYS LIST */}
-                  <div style={cpStyles.baysList}>
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#3b82f6')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay B1</div>
-                          <div style={cpStyles.bayStatus}>Charging</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>71 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#3b82f6')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay B2</div>
-                          <div style={cpStyles.bayStatus}>Charging</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>66 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#10b981')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay B3</div>
-                          <div style={cpStyles.bayStatus}>Available</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>29 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#f59e0b')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay B4</div>
-                          <div style={cpStyles.bayStatus}>Maintenance</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>8 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#10b981')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Bay B5</div>
-                          <div style={cpStyles.bayStatus}>Available</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>24 kWh today</div>
-                    </div>
-                  </div>
-                  <div style={cpStyles.stationFooter}>View all bays →</div>
-                </div>
-
-                {/* 3. PORT TERMINAL */}
-                <div style={cpStyles.stationCard}>
-                  <div style={cpStyles.stationHeader}>
-                    <div>
-                      <h4 style={cpStyles.stationName}>
-                        Port Terminal <span style={{ ...cpStyles.onlineBadge, backgroundColor: '#ffedd5', color: '#ea580c' }}>Maintenance</span>
-                      </h4>
-                      <p style={cpStyles.stationLoc}>📍 Coal Handling and Logistics</p>
-                    </div>
-                    <button style={cpStyles.stationConfigBtn}>⚙️</button>
-                  </div>
-
-                  <div style={cpStyles.stationMetaRow}>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>2/8</span>
-                      <span style={cpStyles.metaBoxLbl}>Slots</span>
-                    </div>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>920 kWh</span>
-                      <span style={cpStyles.metaBoxLbl}>Consumed</span>
-                    </div>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>56%</span>
-                      <span style={cpStyles.metaBoxLbl}>Util.</span>
-                    </div>
-                    <div style={cpStyles.metaBox}>
-                      <span style={cpStyles.metaBoxVal}>4 units</span>
-                      <span style={cpStyles.metaBoxLbl}>Chargers</span>
-                    </div>
-                  </div>
-
-                  {/* BAYS LIST */}
-                  <div style={cpStyles.baysList}>
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#10b981')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Dock 1</div>
-                          <div style={cpStyles.bayStatus}>Available</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>19 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#94a3b8')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Dock 2</div>
-                          <div style={cpStyles.bayStatus}>Offline</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>0 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#f59e0b')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Dock 3</div>
-                          <div style={cpStyles.bayStatus}>Maintenance</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>7 kWh today</div>
-                    </div>
-
-                    <div style={cpStyles.bayItemStatic}>
-                      <div style={cpStyles.bayLeft}>
-                        <div style={cpStyles.bayDot('#3b82f6')} />
-                        <div>
-                          <div style={cpStyles.bayName}>Dock 4</div>
-                          <div style={cpStyles.bayStatus}>Charging</div>
-                        </div>
-                      </div>
-                      <div style={cpStyles.bayUsage}>44 kWh today</div>
-                    </div>
-                  </div>
-                  <div style={cpStyles.stationFooter}>View all bays →</div>
-                </div>
-
               </div>
 
               {/* CHARGER CONTROL PANEL MODAL/DRAWER (REAL-TIME POPUP ON CLICK BAYS) */}
@@ -1336,7 +1061,25 @@ export default function AdminDashboardPage() {
                     <div style={cpStyles.modalHeader}>
                       <div>
                         <h3 style={cpStyles.modalTitle}>Charger Controller</h3>
-                        <p style={cpStyles.modalSubtitle}>Device: {selectedChargerId}</p>
+                        <p style={cpStyles.modalSubtitle}>
+                          Device: {selectedChargerId}
+                          {CHARGER_CONFIGS.find((c) => c.chargerId === selectedChargerId)?.chargerIp &&
+                            ` · ${CHARGER_CONFIGS.find((c) => c.chargerId === selectedChargerId)?.chargerIp}`}
+                        </p>
+                        <p style={{ margin: '6px 0 0', fontSize: 12 }}>
+                          <span style={
+                            chargerConnections[selectedChargerId]?.connected
+                              ? cpStyles.onlineBadge
+                              : cpStyles.offlineBadge
+                          }>
+                            OCPP {chargerConnections[selectedChargerId]?.connected ? 'Online' : 'Offline'}
+                          </span>
+                          {!chargerConnections[selectedChargerId]?.connected && (
+                            <span style={{ color: '#64748b', marginLeft: 8 }}>
+                              Configure charger: ws://&lt;PC-IP&gt;:9000/ocpp/{selectedChargerId}
+                            </span>
+                          )}
+                        </p>
                       </div>
                       <button onClick={() => { setSelectedChargerId(null); setActivationError(''); }} style={cpStyles.closeModalBtn}>✕</button>
                     </div>
@@ -1345,7 +1088,8 @@ export default function AdminDashboardPage() {
                     {sessions[selectedChargerId].status === 'IDLE' && (
                       <div style={cpStyles.modalBody}>
                         <p style={{ color: '#475569', fontSize: 14, marginBottom: 20 }}>
-                          Select a registered RFID card to simulate tap and authorize the charging session on {selectedChargerId}.
+                          Register an RFID card in Top-Up, then tap it on the charger reader to start a session.
+                          You can also select a card below to send a remote start command.
                         </p>
                         
                         <div style={dashStyles.formGroup}>
@@ -1758,27 +1502,63 @@ export default function AdminDashboardPage() {
             </div>
           )}
 
-          {/* ───────────────────────────────────────────────────────
-              OTHER MOCK VIEWS (ENERGY, FINANCE, OPERATORS, HISTORY, SETTINGS)
-              ─────────────────────────────────────────────────────── */}
-          {(currentTab === 'energy' || currentTab === 'finance' || currentTab === 'operators' || currentTab === 'history' || currentTab === 'settings') && (
-            <div style={dashStyles.viewContainer}>
-              <div style={dashStyles.panelCard}>
-                <h3 style={dashStyles.panelTitle}>
-                  {currentTab.toUpperCase()} PANEL
-                </h3>
-                <p style={{ color: '#64748b', fontSize: 14, marginTop: 10 }}>
-                  This screen is currently in mock display mode. Real-time logging is fully functional under <strong>Dashboard</strong>, <strong>Chargepoints</strong>, and <strong>Top-Up</strong> tabs.
-                </p>
-                <div style={{ marginTop: 24, padding: 40, border: '2px dashed #cbd5e1', borderRadius: 12, textAlign: 'center', color: '#94a3b8' }}>
-                  📊 Analytics and Report details will show up here.
-                </div>
-              </div>
-            </div>
-          )}
 
         </main>
       </div>
+
+      {/* Global RFID denial alert — shown immediately when an unregistered/blocked card is tapped */}
+      {rfidDeniedModal && (
+        <div style={cpStyles.alertOverlay}>
+          <div style={{
+            ...cpStyles.modalCard,
+            border: rfidDeniedModal.reason === 'Invalid' ? '2px solid #f97316' : '2px solid #ef4444',
+            maxWidth: 520,
+          }}>
+            <div style={{ textAlign: 'center', marginBottom: 20 }}>
+              <div style={{
+                width: 72,
+                height: 72,
+                borderRadius: '50%',
+                backgroundColor: rfidDeniedModal.reason === 'Invalid' ? '#ffedd5' : '#fee2e2',
+                color: rfidDeniedModal.reason === 'Invalid' ? '#ea580c' : '#dc2626',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 36,
+                margin: '0 auto 16px',
+              }}>
+                ⚠
+              </div>
+              <h3 style={{ ...cpStyles.modalTitle, fontSize: 22, marginBottom: 8 }}>
+                {rfidDeniedModal.reason === 'Invalid' ? 'Unregistered RFID Detected' : 'RFID Access Denied'}
+              </h3>
+              <p style={{ color: '#64748b', fontSize: 14, margin: 0 }}>
+                Charger <strong>{rfidDeniedModal.chargerId}</strong> — charging was <strong>not started</strong>.
+              </p>
+            </div>
+
+            <div style={cpStyles.alertUidBox}>
+              <div style={cpStyles.alertUidLabel}>RFID Card UID</div>
+              <div style={cpStyles.alertUidValue}>{rfidDeniedModal.rfidCardId}</div>
+            </div>
+
+            <p style={{ color: '#475569', fontSize: 14, lineHeight: 1.5, margin: '16px 0 24px', textAlign: 'center' }}>
+              {rfidDeniedModal.message}
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {rfidDeniedModal.reason === 'Invalid' && (
+                <button onClick={handleRegisterFromRfidAlert} style={cpStyles.alertPrimaryBtn}>
+                  Register This Card in Top-Up
+                </button>
+              )}
+              <button onClick={handleDismissRfidAlert} style={cpStyles.alertDismissBtn}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2590,6 +2370,14 @@ const cpStyles = {
     padding: '2px 8px',
     borderRadius: 12,
   },
+  offlineBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    backgroundColor: '#fee2e2',
+    color: '#991b1b',
+    padding: '2px 8px',
+    borderRadius: 12,
+  },
   stationLoc: {
     fontSize: 11,
     color: '#64748b',
@@ -2709,6 +2497,64 @@ const cpStyles = {
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 999,
+  },
+  alertOverlay: {
+    position: 'fixed' as const,
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    backdropFilter: 'blur(6px)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2000,
+    padding: 20,
+  },
+  alertUidBox: {
+    backgroundColor: '#fff7ed',
+    border: '1px solid #fed7aa',
+    borderRadius: 12,
+    padding: '14px 16px',
+    textAlign: 'center' as const,
+  },
+  alertUidLabel: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#ea580c',
+    textTransform: 'uppercase' as const,
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  alertUidValue: {
+    fontSize: 20,
+    fontWeight: 800,
+    color: '#0f172a',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  alertPrimaryBtn: {
+    width: '100%',
+    padding: '14px 20px',
+    backgroundColor: '#7c3aed',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: 12,
+    fontSize: 15,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  alertDismissBtn: {
+    width: '100%',
+    padding: '12px 20px',
+    backgroundColor: '#f1f5f9',
+    color: '#475569',
+    border: 'none',
+    borderRadius: 12,
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: 'pointer',
   },
   modalCard: {
     backgroundColor: '#ffffff',

@@ -1,0 +1,31 @@
+{
+  "poll_interval_seconds": 20,
+  "restart_cooldown_seconds": 15,
+  "log_path": "logs/watcher.log",
+  "services": [
+    {
+      "id": "backend",
+      "display_name": "Stratacore Backend API",
+      "windows_service_name": "",
+      "health_check": {
+        "type": "http",
+        "url": "http://127.0.0.1:4001/api/health",
+        "timeout_seconds": 3,
+        "expected_status_codes": [200]
+      },
+      "failure_threshold": 3,
+      "restart_command": "npm run dev --workspace=backend"
+    },
+    {
+      "id": "ocpp",
+      "display_name": "OCPP WebSocket Server",
+      "health_check": {
+        "type": "tcp",
+        "host": "127.0.0.1",
+        "port": 9000,
+        "timeout_seconds": 3
+      },
+      "failure_threshold": 3
+    }
+  ]
+}
