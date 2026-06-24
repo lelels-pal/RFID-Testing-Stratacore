@@ -1,0 +1,20 @@
+# LAN-only HTTP — no TLS, no public DNS. Best for chargers that reject self-signed wss://.
+# Use with deploy/env.local.example (http:// URLs).
+#
+# Linux: sudo cp deploy/Caddyfile.local-http /etc/caddy/Caddyfile && sudo systemctl restart caddy
+
+http://api.stratacore.tech {
+	reverse_proxy localhost:4001
+}
+
+http://admin.stratacore.tech {
+	reverse_proxy localhost:3001
+}
+
+http://guest.stratacore.tech {
+	reverse_proxy localhost:3002
+}
+
+http://ocpp.stratacore.tech {
+	reverse_proxy localhost:9000
+}

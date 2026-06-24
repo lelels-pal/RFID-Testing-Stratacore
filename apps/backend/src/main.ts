@@ -7,8 +7,18 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS since Kiosk & Guest Apps are client web applications
-  app.enableCors();
+  // Trust reverse proxy (Caddy/nginx) for X-Forwarded-* headers
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
+  const corsOrigins = process.env.CORS_ALLOWED_ORIGINS
+    ?.split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  app.enableCors({
+    origin: corsOrigins?.length ? corsOrigins : true,
+    credentials: true,
+  });
 
   const port = process.env.PORT || 4001;
   const ocppWsPort = process.env.OCPP_WS_PORT || 9000;

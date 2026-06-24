@@ -2,13 +2,16 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload, OcppTraceEntry } from '@packages/shared';
+import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload, OcppTraceEntry, getApiBaseUrl } from '@packages/shared';
 import {
   getChargerConfigs,
   STATION_NAME,
   STATION_LOCATION,
   validateKioskLogin,
   isKioskAuthConfigured,
+  persistKioskLogin,
+  clearKioskLogin,
+  isKioskLoginPersisted,
 } from '../lib/config';
 
 const CHARGER_CONFIGS = getChargerConfigs();
@@ -23,6 +26,7 @@ const WsEvents = {
   SESSION_ERROR: 'session:error',
   RFID_AUTH_DENIED: 'rfid:auth_denied',
   OCPP_TRACE: 'ocpp:trace',
+  CHARGER_CONNECTION_CHANGED: 'charger:connection_changed',
   SUBSCRIBE_CHARGER: 'subscribe:charger',
 };
 
@@ -42,9 +46,13 @@ interface LocalSessionState {
 }
 
 function getBackendUrl() {
-  if (process.env.NEXT_PUBLIC_BACKEND_URL) return process.env.NEXT_PUBLIC_BACKEND_URL;
-  if (typeof window !== 'undefined') return `${window.location.protocol}//${window.location.hostname}:4001`;
-  return 'http://localhost:4001';
+  return getApiBaseUrl({
+    envUrl: process.env.NEXT_PUBLIC_BACKEND_URL,
+    origin:
+      typeof window !== 'undefined'
+        ? { protocol: window.location.protocol, hostname: window.location.hostname }
+        : undefined,
+  });
 }
 
 // Quotas reset on the 1st of every calendar month. Returns the next reset date.
@@ -62,11 +70,22 @@ function isCardExhausted(card: RfidCard): boolean {
   return card.currentMonthKwhConsumed >= card.monthlyKwhLimit;
 }
 
-function getSessionDotColor(status: LocalSessionState['status']): string {
+function getSessionDotColor(status: LocalSessionState['status'], isOnline = true): string {
+  if (!isOnline) return '#64748b';
   if (status === 'CHARGING') return '#3b82f6';
   if (status === 'PREPARING') return '#f59e0b';
   if (status === 'ERROR') return '#ef4444';
   return '#10b981';
+}
+
+function getBayDisplay(session: LocalSessionState, isOnline: boolean): {
+  status: string;
+  statusMessage: string;
+} {
+  if (!isOnline) {
+    return { status: 'OFFLINE', statusMessage: 'Charger not connected' };
+  }
+  return { status: session.status, statusMessage: session.statusMessage };
 }
 
 function getBayLabel(charger: ChargerDefinition, index: number): string {
@@ -121,6 +140,7 @@ function getOcppTraceSummary(entry: OcppTraceEntry): string {
 export default function AdminDashboardPage() {
   // Authentication State
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -128,9 +148,10 @@ export default function AdminDashboardPage() {
 
   // Layout & Routing State
   const [currentTab, setCurrentTab] = useState<ViewTab>('dashboard');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Real-Time System Data State
-  const [backendUrl, setBackendUrl] = useState('http://localhost:4001');
+  const [backendUrl, setBackendUrl] = useState(() => getBackendUrl());
   const [rfidCards, setRfidCards] = useState<RfidCard[]>([]);
   const [sessions, setSessions] = useState<Record<string, LocalSessionState>>(() =>
     Object.fromEntries(CHARGER_CONFIGS.map((c) => [c.chargerId, {
@@ -172,6 +193,24 @@ export default function AdminDashboardPage() {
   useEffect(() => {
     setBackendUrl(getBackendUrl());
   }, []);
+
+  useEffect(() => {
+    if (isKioskLoginPersisted()) {
+      setIsLoggedIn(true);
+    }
+    setAuthChecked(true);
+  }, []);
+
+  useEffect(() => {
+    const closeSidebar = () => setSidebarOpen(false);
+    window.addEventListener('resize', closeSidebar);
+    return () => window.removeEventListener('resize', closeSidebar);
+  }, []);
+
+  const navigateToTab = (tab: ViewTab) => {
+    setCurrentTab(tab);
+    setSidebarOpen(false);
+  };
 
   // Fetch RFIDs from Backend
   const fetchRfids = async () => {
@@ -334,6 +373,10 @@ export default function AdminDashboardPage() {
       setOcppTrace((prev) => [entry, ...prev].slice(0, 100));
     });
 
+    socket.on(WsEvents.CHARGER_CONNECTION_CHANGED, (info: ChargerConnectionInfo) => {
+      setChargerConnections((prev) => ({ ...prev, [info.chargerId]: info }));
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -347,6 +390,7 @@ export default function AdminDashboardPage() {
       return;
     }
     if (validateKioskLogin(username, password)) {
+      persistKioskLogin();
       setIsLoggedIn(true);
       setLoginError('');
     } else {
@@ -368,6 +412,10 @@ export default function AdminDashboardPage() {
   // Start Charging Handler
   const handleStartCharging = async () => {
     if (!selectedChargerId || !selectedRfid) return;
+    if (!chargerConnections[selectedChargerId]?.connected) {
+      setActivationError('Charger is offline. Connect OCPP before remote start.');
+      return;
+    }
     setActivationError('');
 
     try {
@@ -584,11 +632,15 @@ export default function AdminDashboardPage() {
   // ═══════════════════════════════════════════════════════════════
   // LOGIN VIEW RENDER
   // ═══════════════════════════════════════════════════════════════
+  if (!authChecked) {
+    return null;
+  }
+
   if (!isLoggedIn) {
     return (
-      <div style={loginStyles.pageWrapper}>
+      <div className="sc-login-page" style={loginStyles.pageWrapper}>
         {/* Background Geometric Vectors */}
-        <div style={loginStyles.bgLeftSVG}>
+        <div className="sc-login-bg" style={loginStyles.bgLeftSVG}>
           <svg width="400" height="700" viewBox="0 0 400 700" fill="none">
             <path d="M-100 100 L250 450 L100 600" stroke="#a78bfa" strokeWidth="2" strokeOpacity="0.4"/>
             <path d="M-50 80 L300 430 L150 580" stroke="#7c3aed" strokeWidth="4" strokeOpacity="0.6"/>
@@ -596,7 +648,7 @@ export default function AdminDashboardPage() {
             <circle cx="250" cy="450" r="4" fill="#a78bfa"/>
           </svg>
         </div>
-        <div style={loginStyles.bgRightSVG}>
+        <div className="sc-login-bg" style={loginStyles.bgRightSVG}>
           <svg width="400" height="700" viewBox="0 0 400 700" fill="none">
             <path d="M500 200 L150 400 L250 550" stroke="#a78bfa" strokeWidth="2" strokeOpacity="0.4"/>
             <path d="M550 180 L200 380 L300 530" stroke="#7c3aed" strokeWidth="4" strokeOpacity="0.6"/>
@@ -605,14 +657,14 @@ export default function AdminDashboardPage() {
           </svg>
         </div>
 
-        <div style={loginStyles.cardContainer}>
+        <div className="sc-login-card" style={loginStyles.cardContainer}>
           <div style={loginStyles.avatarWrapper}>
             <svg style={loginStyles.avatarIcon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
             </svg>
           </div>
           
-          <h1 style={loginStyles.title}>
+          <h1 className="sc-login-title" style={loginStyles.title}>
             STRATA<span style={{ color: '#7c3aed' }}>CORE</span>
           </h1>
           
@@ -665,7 +717,7 @@ export default function AdminDashboardPage() {
 
             {loginError && <div style={loginStyles.errorMessage}>{loginError}</div>}
 
-            <button type="submit" style={loginStyles.submitBtn}>
+            <button type="submit" className="sc-submit-btn" style={loginStyles.submitBtn}>
               Sign In <span style={{ marginLeft: 8 }}>→</span>
             </button>
           </form>
@@ -678,11 +730,19 @@ export default function AdminDashboardPage() {
   // ADMIN DASHBOARD LAYOUT & VIEWS
   // ═══════════════════════════════════════════════════════════════
   return (
-    <div style={dashStyles.layoutWrapper}>
+    <div className="sc-layout" style={dashStyles.layoutWrapper}>
+      <div
+        className={`sc-sidebar-backdrop${sidebarOpen ? ' sc-visible' : ''}`}
+        onClick={() => setSidebarOpen(false)}
+        aria-hidden={!sidebarOpen}
+      />
       {/* ───────────────────────────────────────────────────────────
           LEFT SIDEBAR
           ─────────────────────────────────────────────────────────── */}
-      <aside style={dashStyles.sidebar}>
+      <aside
+        className={`sc-sidebar${sidebarOpen ? ' sc-sidebar-open' : ''}`}
+        style={dashStyles.sidebar}
+      >
         <div style={dashStyles.logoSection}>
           <div style={dashStyles.logoText}>
             STRATA<span style={{ color: '#818cf8' }}>CORE</span>
@@ -700,7 +760,8 @@ export default function AdminDashboardPage() {
             return (
               <button
                 key={item.id}
-                onClick={() => setCurrentTab(item.id as ViewTab)}
+                onClick={() => navigateToTab(item.id as ViewTab)}
+                className="sc-nav-item"
                 style={{
                   ...dashStyles.navItem,
                   ...(isActive ? dashStyles.navItemActive : {}),
@@ -724,7 +785,7 @@ export default function AdminDashboardPage() {
         </nav>
 
         <div style={dashStyles.sidebarFooter}>
-          <button onClick={() => setIsLoggedIn(false)} style={{ ...dashStyles.navItem, color: '#f87171' }}>
+          <button onClick={() => { clearKioskLogin(); setIsLoggedIn(false); }} style={{ ...dashStyles.navItem, color: '#f87171' }}>
             <svg style={dashStyles.navIcon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
             </svg>
@@ -736,16 +797,22 @@ export default function AdminDashboardPage() {
       {/* ───────────────────────────────────────────────────────────
           MAIN PANEL CONTAINER
           ─────────────────────────────────────────────────────────── */}
-      <div style={dashStyles.mainContainer}>
+      <div className="sc-main" style={dashStyles.mainContainer}>
         {/* TOP BAR HEADER */}
-        <header style={dashStyles.header}>
+        <header className="sc-header" style={dashStyles.header}>
           <div style={dashStyles.headerLeft}>
-            <button style={dashStyles.menuButton}>
+            <button
+              type="button"
+              className="sc-menu-button"
+              style={dashStyles.menuButton}
+              onClick={() => setSidebarOpen((open) => !open)}
+              aria-label="Open navigation menu"
+            >
               <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
-            <h2 style={dashStyles.headerTitle}>
+            <h2 className="sc-header-title" style={dashStyles.headerTitle}>
               {currentTab === 'dashboard' && 'Dashboard'}
               {currentTab === 'chargepoints' && 'Charge Points'}
               {currentTab === 'topup' && 'RFID Top-Up Allocation'}
@@ -762,7 +829,7 @@ export default function AdminDashboardPage() {
 
             <div style={dashStyles.profilePill}>
               <div style={dashStyles.avatarCircle}>{username.charAt(0).toUpperCase() || 'O'}</div>
-              <div style={dashStyles.profileTextGroup}>
+              <div className="sc-header-profile-text" style={dashStyles.profileTextGroup}>
                 <div style={dashStyles.profileName}>{username || 'Operator'}</div>
                 <div style={dashStyles.profileRole}>Station Operator</div>
               </div>
@@ -774,7 +841,7 @@ export default function AdminDashboardPage() {
         </header>
 
         {/* CONTENT VIEWPORT */}
-        <main style={dashStyles.contentViewport}>
+        <main className="sc-content-viewport" style={dashStyles.contentViewport}>
           
           {/* ───────────────────────────────────────────────────────
               TAB 1: DASHBOARD VIEW
@@ -782,7 +849,7 @@ export default function AdminDashboardPage() {
           {currentTab === 'dashboard' && (
             <div style={dashStyles.viewContainer}>
               {/* TOP METRICS SUMMARY */}
-              <div style={dashStyles.metricsGrid}>
+              <div className="sc-metrics-grid" style={dashStyles.metricsGrid}>
                 
                 {/* 1. ONLINE CHARGERS */}
                 <div style={{ ...dashStyles.metricCard, borderLeft: '4px solid #10b981' }}>
@@ -790,7 +857,7 @@ export default function AdminDashboardPage() {
                     <span style={dashStyles.metricLabel}>ONLINE CHARGERS</span>
                     <span style={{ ...dashStyles.metricIconWrapper, backgroundColor: '#d1fae5', color: '#10b981' }}>🔌</span>
                   </div>
-                  <div style={dashStyles.metricValue}>
+                  <div className="sc-metric-value" style={dashStyles.metricValue}>
                     {onlineChargersCount} / {CHARGER_CONFIGS.length}
                   </div>
                   <div style={{ ...dashStyles.metricSubtext, color: onlinePct === 100 ? '#10b981' : '#f59e0b' }}>
@@ -836,9 +903,9 @@ export default function AdminDashboardPage() {
               <div style={dashStyles.dashGridTwoCol}>
                 
                 {/* LEFT COLUMN */}
-                <div style={dashStyles.dashColLeft}>
+                <div className="sc-dash-col-left" style={dashStyles.dashColLeft}>
                   {/* Energy Consumption chart card */}
-                  <div style={dashStyles.panelCard}>
+                  <div className="sc-panel-card" style={dashStyles.panelCard}>
                     <div style={dashStyles.panelHeader}>
                       <h3 style={dashStyles.panelTitle}>ENERGY CONSUMPTION (KWH)</h3>
                     </div>
@@ -863,7 +930,7 @@ export default function AdminDashboardPage() {
                       <button onClick={() => setCurrentTab('chargepoints')} style={dashStyles.panelViewAll}>View all</button>
                     </div>
                     
-                    <div style={{ overflowX: 'auto' }}>
+                    <div className="sc-table-wrap">
                       <table style={dashStyles.table}>
                         <thead>
                           <tr style={dashStyles.tableHeaderRow}>
@@ -936,7 +1003,7 @@ export default function AdminDashboardPage() {
                 </div>
 
                 {/* RIGHT COLUMN */}
-                <div style={dashStyles.dashColRight}>
+                <div className="sc-dash-col-right" style={dashStyles.dashColRight}>
                   {/* Recent Alerts */}
                   <div style={dashStyles.panelCard}>
                     <div style={dashStyles.panelHeader}>
@@ -1172,7 +1239,7 @@ export default function AdminDashboardPage() {
               </div>
 
               {/* STATIONS GRID */}
-              <div style={cpStyles.stationsGrid}>
+              <div className="sc-stations-grid" style={cpStyles.stationsGrid}>
                 <div style={cpStyles.stationCard}>
                   <div style={cpStyles.stationHeader}>
                     <div>
@@ -1210,18 +1277,20 @@ export default function AdminDashboardPage() {
                       const session = sessions[charger.chargerId];
                       const connection = chargerConnections[charger.chargerId];
                       const isOnline = connection?.connected ?? false;
+                      const bayDisplay = getBayDisplay(session, isOnline);
 
                       return (
                         <div
                           key={charger.chargerId}
+                          className="sc-bay-item"
                           onClick={() => setSelectedChargerId(charger.chargerId)}
                           style={{
                             ...cpStyles.bayItem,
-                            ...(session.status !== 'IDLE' ? cpStyles.bayItemActive : {}),
+                            ...(session.status !== 'IDLE' && isOnline ? cpStyles.bayItemActive : {}),
                           }}
                         >
                           <div style={cpStyles.bayLeft}>
-                            <div style={cpStyles.bayDot(getSessionDotColor(session.status))} />
+                            <div style={cpStyles.bayDot(getSessionDotColor(session.status, isOnline))} />
                             <div>
                               <div style={cpStyles.bayName}>
                                 {getBayLabel(charger, index + 1)}{' '}
@@ -1230,7 +1299,7 @@ export default function AdminDashboardPage() {
                                 </span>
                               </div>
                               <div style={cpStyles.bayStatus}>
-                                {session.status} - {session.statusMessage}
+                                {bayDisplay.status} - {bayDisplay.statusMessage}
                                 {connection?.status && isOnline ? ` (${connection.status})` : ''}
                               </div>
                             </div>
@@ -1249,8 +1318,8 @@ export default function AdminDashboardPage() {
 
               {/* CHARGER CONTROL PANEL MODAL/DRAWER (REAL-TIME POPUP ON CLICK BAYS) */}
               {selectedChargerId && (
-                <div style={cpStyles.overlay}>
-                  <div style={cpStyles.modalCard}>
+                <div className="sc-modal-overlay" style={cpStyles.overlay}>
+                  <div className="sc-modal-card" style={cpStyles.modalCard}>
                     <div style={cpStyles.modalHeader}>
                       <div>
                         <h3 style={cpStyles.modalTitle}>Charger Controller</h3>
@@ -1280,10 +1349,17 @@ export default function AdminDashboardPage() {
                     {/* INTERACTIVE CONTROLS */}
                     {sessions[selectedChargerId].status === 'IDLE' && (
                       <div style={cpStyles.modalBody}>
+                        {!chargerConnections[selectedChargerId]?.connected ? (
+                          <p style={{ color: '#64748b', fontSize: 14, marginBottom: 20 }}>
+                            This charger is offline. Connect it to OCPP at{' '}
+                            <code>wss://ocpp.stratacore.tech/ocpp/{selectedChargerId}</code> before starting a session.
+                          </p>
+                        ) : (
                         <p style={{ color: '#475569', fontSize: 14, marginBottom: 20 }}>
                           Register an RFID card in Top-Up, then tap it on the charger reader to start a session.
                           You can also select a card below to send a remote start command.
                         </p>
+                        )}
                         
                         <div style={dashStyles.formGroup}>
                           <label style={dashStyles.label}>Select RFID Card</label>
@@ -1345,12 +1421,12 @@ export default function AdminDashboardPage() {
 
                               <button
                                 onClick={handleStartCharging}
-                                disabled={!selectedRfid || exhausted}
+                                disabled={!selectedRfid || exhausted || !chargerConnections[selectedChargerId]?.connected}
                                 style={{
                                   ...dashStyles.btnSubmit,
                                   marginTop: 20,
-                                  opacity: (!selectedRfid || exhausted) ? 0.6 : 1,
-                                  cursor: (!selectedRfid || exhausted) ? 'not-allowed' : 'pointer',
+                                  opacity: (!selectedRfid || exhausted || !chargerConnections[selectedChargerId]?.connected) ? 0.6 : 1,
+                                  cursor: (!selectedRfid || exhausted || !chargerConnections[selectedChargerId]?.connected) ? 'not-allowed' : 'pointer',
                                 }}
                               >
                                 {exhausted ? 'Quota Exhausted — Charging Blocked' : 'Simulate Tap & Start Charging'}
@@ -1483,11 +1559,11 @@ export default function AdminDashboardPage() {
               ─────────────────────────────────────────────────────── */}
           {currentTab === 'topup' && (
             <div style={dashStyles.viewContainer}>
-              <div style={dashStyles.dashGridTwoCol}>
+              <div className="sc-topup-grid" style={dashStyles.dashGridTwoCol}>
                 
                 {/* LEFT COLUMN: MANUALLY ADD RFID */}
                 <div style={{ flex: '1 1 350px' }}>
-                  <div style={dashStyles.panelCard}>
+                  <div className="sc-panel-card" style={dashStyles.panelCard}>
                     <h3 style={dashStyles.panelTitle}>ADD NEW RFID CARD</h3>
                     <p style={{ color: '#64748b', fontSize: 13, marginBottom: 20 }}>
                       Enter the RFID card details and allocate custom monthly kWh limit below.
@@ -1646,8 +1722,8 @@ export default function AdminDashboardPage() {
 
               {/* EDIT ALLOCATION MODAL */}
               {editingCard && (
-                <div style={cpStyles.overlay}>
-                  <div style={{ ...cpStyles.modalCard, maxWidth: 460 }}>
+                <div className="sc-modal-overlay" style={cpStyles.overlay}>
+                  <div className="sc-modal-card" style={{ ...cpStyles.modalCard, maxWidth: 460 }}>
                     <div style={cpStyles.modalHeader}>
                       <div>
                         <h3 style={cpStyles.modalTitle}>Edit Allocation</h3>
@@ -1701,7 +1777,7 @@ export default function AdminDashboardPage() {
 
       {/* Global RFID denial alert — shown immediately when an unregistered/blocked card is tapped */}
       {rfidDeniedModal && (
-        <div style={cpStyles.alertOverlay}>
+        <div className="sc-modal-overlay" style={cpStyles.alertOverlay}>
           <div style={{
             ...cpStyles.modalCard,
             border: rfidDeniedModal.reason === 'Invalid' ? '2px solid #f97316' : '2px solid #ef4444',
@@ -1855,7 +1931,7 @@ const loginStyles = {
     padding: '14px 14px 14px 44px',
     borderRadius: 14,
     border: '1px solid #d1d5db',
-    fontSize: 14,
+    fontSize: 16,
     outline: 'none',
     transition: 'border-color 0.2s',
   },
@@ -2658,7 +2734,7 @@ const cpStyles = {
   },
   stationsGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))',
     gap: 24,
   },
   stationCard: {

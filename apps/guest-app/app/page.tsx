@@ -3,6 +3,7 @@
 import React, { useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
+import { getApiBaseUrl } from '@packages/shared';
 
 const WsEvents = {
   SESSION_CLAIMED:   'session:claimed',
@@ -33,9 +34,13 @@ type Step = 'HANDSHAKE' | 'SELECT_PLAN' | 'PAYING' | 'CHARGING' | 'COMPLETED' | 
 const STEP_ORDER: Step[] = ['HANDSHAKE', 'SELECT_PLAN', 'PAYING', 'CHARGING', 'COMPLETED'];
 
 function getBackendUrl() {
-  if (process.env.NEXT_PUBLIC_BACKEND_URL) return process.env.NEXT_PUBLIC_BACKEND_URL;
-  if (typeof window !== 'undefined') return `${window.location.protocol}//${window.location.hostname}:4001`;
-  return 'http://localhost:4001';
+  return getApiBaseUrl({
+    envUrl: process.env.NEXT_PUBLIC_BACKEND_URL,
+    origin:
+      typeof window !== 'undefined'
+        ? { protocol: window.location.protocol, hostname: window.location.hostname }
+        : undefined,
+  });
 }
 
 function formatDuration(seconds: number): string {

@@ -4,7 +4,7 @@ import * as jwt from 'jsonwebtoken';
 import { Request } from 'express';
 import { RedisService } from '../redis/redis.service';
 import { ChargerGateway } from '../charging/charging.gateway';
-import { VerifySessionResponse, ChargerStatus } from '@packages/shared';
+import { VerifySessionResponse, ChargerStatus, buildGuestClaimUrl } from '@packages/shared';
 
 @Injectable()
 export class AuthService {
@@ -111,26 +111,19 @@ export class AuthService {
   }
 
   private buildGuestClaimUrl(req: Request, rawToken: string): string {
-    if (this.guestAppUrl) {
-      return `${this.guestAppUrl.replace(/\/$/, '')}/claim?token=${rawToken}`;
-    }
-
     const originHeader = req.get('origin');
     const refererHeader = req.get('referer');
+    const origin = originHeader
+      ? new URL(originHeader)
+      : refererHeader
+        ? new URL(refererHeader)
+        : null;
 
-    if (originHeader) {
-      const origin = new URL(originHeader);
-      return `${origin.protocol}//${origin.hostname}:3002/claim?token=${rawToken}`;
-    }
-
-    if (refererHeader) {
-      const referer = new URL(refererHeader);
-      return `${referer.protocol}//${referer.hostname}:3002/claim?token=${rawToken}`;
-    }
-
-    const host = req.get('host') || 'localhost:4001';
-    const protocol = req.protocol || 'http';
-    const hostname = host.split(':')[0];
-    return `${protocol}://${hostname}:3002/claim?token=${rawToken}`;
+    return buildGuestClaimUrl(rawToken, {
+      guestAppUrl: this.guestAppUrl,
+      origin: origin
+        ? { protocol: origin.protocol, hostname: origin.hostname }
+        : undefined,
+    });
   }
 }

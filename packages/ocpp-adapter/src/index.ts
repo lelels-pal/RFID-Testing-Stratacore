@@ -310,10 +310,11 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
     lastSeenAt?: string;
   } {
     const charger = this.chargers.get(chargerId);
+    const connected = charger?.socket?.readyState === WebSocket.OPEN;
     return {
       chargerId,
-      connected: charger?.socket?.readyState === WebSocket.OPEN,
-      status: charger?.status ?? 'Unavailable',
+      connected,
+      status: connected ? (charger?.status ?? 'Unavailable') : 'Unavailable',
       lastSeenAt: charger?.lastSeenAt,
     };
   }

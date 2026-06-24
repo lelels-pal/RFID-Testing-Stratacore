@@ -48,6 +48,11 @@ export class ChargingService implements OnModuleInit {
       recoverStaleSession: (chargerId, connectorId) => this.recoverStaleSession(chargerId, connectorId),
     });
 
+    realtimeAdapter.on('chargerConnected', (event: { chargerId: string; status: ChargerStatus }) => {
+      this.logger.log(`Charger connected via OCPP: ${event.chargerId}`);
+      this.emitConnectionChanged(event.chargerId);
+    });
+
     realtimeAdapter.on('status', (event: { chargerId: string; connectorId: number; status: ChargerStatus }) => {
       if (event.status === 'Preparing') {
         this.activeSessions.add(event.chargerId);
@@ -100,6 +105,10 @@ export class ChargingService implements OnModuleInit {
             connectorId: event.connectorId,
             message: `Charger status changed to ${event.status}.`,
           });
+        }
+
+        if (event.status === 'Unavailable') {
+          this.emitConnectionChanged(event.chargerId);
         }
       }
     });
@@ -504,5 +513,11 @@ export class ChargingService implements OnModuleInit {
 
   getOcppTrace(limit = 50, rfidOnly = false) {
     return this.ocppTrace.list(limit, rfidOnly);
+  }
+
+  private emitConnectionChanged(chargerId: string) {
+    const adapter = this.ocppAdapter as SteveOcppAdapter;
+    const info = adapter.getChargerConnectionInfo(chargerId);
+    this.wsGateway.emitChargerConnectionChanged(info);
   }
 }

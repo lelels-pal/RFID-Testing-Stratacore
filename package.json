@@ -10,6 +10,9 @@
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "sim": "node tools/charger-simulator.js",
+    "setup:stratacore": "powershell -ExecutionPolicy Bypass -File deploy/setup-stratacore.ps1",
+    "start:stratacore": "powershell -ExecutionPolicy Bypass -File deploy/start-stratacore.ps1",
+    "stop:stratacore": "powershell -ExecutionPolicy Bypass -File deploy/stop-stratacore.ps1",
     "watchdog:check": "node tools/watchdog/service-watchdog.js",
     "watchdog:watch": "node tools/watchdog/service-watcher.js --config tools/watchdog/services.json",
     "clean": "turbo run clean && rm -rf node_modules"

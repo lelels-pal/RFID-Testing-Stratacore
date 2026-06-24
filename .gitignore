@@ -5,3 +5,5 @@ dist
 *.tsbuildinfo
 .env
 .env.local
+deploy/bin/
+deploy/logs/

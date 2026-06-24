@@ -1,0 +1,14 @@
+# Stratacore local DNS via dnsmasq (Docker on Windows).
+# Requires Docker Desktop running.
+services:
+  dnsmasq:
+    image: strm/dnsmasq
+    container_name: stratacore-dnsmasq
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - ./dnsmasq/dnsmasq-docker.conf:/etc/dnsmasq.conf:ro
+    cap_add:
+      - NET_ADMIN

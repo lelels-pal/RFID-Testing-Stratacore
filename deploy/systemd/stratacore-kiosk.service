@@ -1,0 +1,20 @@
+[Unit]
+Description=Stratacore Kiosk (Next.js)
+After=network.target stratacore-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stratacore
+Group=stratacore
+WorkingDirectory=/opt/stratacore/apps/kiosk
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stratacore-kiosk
+
+[Install]
+WantedBy=multi-user.target

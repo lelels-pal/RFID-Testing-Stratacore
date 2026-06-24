@@ -1,8 +1,9 @@
 import React from 'react';
+import './responsive.css';
 
 export const metadata = {
-  title: 'Stratacore EV Charger Kiosk',
-  description: 'Physical EV charging interface screen',
+  title: 'Stratacore Admin',
+  description: 'EV charging station admin — dashboard, chargepoints, and RFID management',
 };
 
 export default function RootLayout({
@@ -13,6 +14,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <meta name="theme-color" content="#0f0c29" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
         <style>{`
           *, *::before, *::after { box-sizing: border-box; }
           body { margin: 0; padding: 0; background-color: #000000; }

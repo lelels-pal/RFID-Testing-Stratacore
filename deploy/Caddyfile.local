@@ -1,0 +1,29 @@
+# Local LAN setup with self-signed HTTPS (same as Windows dev setup).
+# Browsers warn once — accept to continue.
+#
+# Windows: deploy\bin\caddy.exe run --config deploy\Caddyfile.local
+# Linux:   sudo cp deploy/Caddyfile.local /etc/caddy/Caddyfile && sudo systemctl restart caddy
+
+{
+	local_certs
+}
+
+api.stratacore.tech {
+	tls internal
+	reverse_proxy localhost:4001
+}
+
+admin.stratacore.tech {
+	tls internal
+	reverse_proxy localhost:3001
+}
+
+guest.stratacore.tech {
+	tls internal
+	reverse_proxy localhost:3002
+}
+
+ocpp.stratacore.tech {
+	tls internal
+	reverse_proxy localhost:9000
+}

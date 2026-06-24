@@ -1,0 +1,31 @@
+# Reverse proxy for stratacore.tech
+# Install Caddy: https://caddyserver.com/docs/install
+# Run from repo root: caddy run --config deploy/Caddyfile
+#
+# DNS (at your registrar) — point all A records to this machine's public IP:
+#   api.stratacore.tech
+#   admin.stratacore.tech
+#   guest.stratacore.tech
+#   ocpp.stratacore.tech
+#
+# Or use one wildcard: *.stratacore.tech
+
+{
+	email admin@stratacore.tech
+}
+
+api.stratacore.tech {
+	reverse_proxy localhost:4001
+}
+
+admin.stratacore.tech {
+	reverse_proxy localhost:3001
+}
+
+guest.stratacore.tech {
+	reverse_proxy localhost:3002
+}
+
+ocpp.stratacore.tech {
+	reverse_proxy localhost:9000
+}

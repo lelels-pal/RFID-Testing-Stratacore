@@ -47,6 +47,7 @@ export enum WebSocketEvents {
   SESSION_ERROR = 'session:error',           // Failure event (e.g. timeout, fault)
   RFID_AUTH_DENIED = 'rfid:auth_denied',     // Unregistered/blocked RFID tap rejected
   OCPP_TRACE = 'ocpp:trace',               // Raw OCPP packet trace for debugging (kiosk admin)
+  CHARGER_CONNECTION_CHANGED = 'charger:connection_changed', // OCPP connect/disconnect (kiosk admin)
 
   // From Client to Server
   SUBSCRIBE_CHARGER = 'subscribe:charger',   // Client registers for updates to a specific chargerId
@@ -167,4 +168,12 @@ export interface ChargerConnectionInfo {
   status: ChargerStatus;
   lastSeenAt?: string;
 }
+
+export {
+  STRATACORE_DOMAIN,
+  getApiBaseUrl,
+  getGuestAppBaseUrl,
+  buildGuestClaimUrl,
+} from './urls';
+export type { UrlOrigin } from './urls';
 

@@ -1,0 +1,207 @@
+/* Stratacore admin — phone, tablet, iPad */
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+.sc-login-page {
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+
+.sc-login-card {
+  margin: 0 auto;
+}
+
+.sc-login-bg {
+  pointer-events: none;
+}
+
+.sc-content-viewport {
+  -webkit-overflow-scrolling: touch;
+}
+
+.sc-nav-item,
+.sc-menu-button,
+.sc-submit-btn {
+  min-height: 44px;
+}
+
+.sc-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sc-modal-card {
+  max-height: min(92vh, 900px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Tablet */
+@media (max-width: 1023px) {
+  .sc-login-bg {
+    opacity: 0.35;
+  }
+
+  .sc-sidebar {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 1100;
+    width: min(280px, 88vw) !important;
+    transform: translateX(-105%);
+    transition: transform 0.25s ease;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25);
+  }
+
+  .sc-sidebar.sc-sidebar-open {
+    transform: translateX(0);
+  }
+
+  .sc-sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1050;
+    background: rgba(15, 23, 42, 0.5);
+    backdrop-filter: blur(2px);
+  }
+
+  .sc-sidebar-backdrop.sc-visible {
+    display: block;
+  }
+
+  .sc-header {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+
+  .sc-header-profile-text {
+    display: none !important;
+  }
+
+  .sc-stations-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .sc-dash-col-left,
+  .sc-dash-col-right {
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+  }
+
+  .sc-topup-grid {
+    flex-direction: column !important;
+  }
+}
+
+/* Phone */
+@media (max-width: 640px) {
+  .sc-login-bg {
+    display: none;
+  }
+
+  .sc-login-title {
+    font-size: 24px !important;
+    letter-spacing: 1px !important;
+  }
+
+  .sc-login-card {
+    padding: 28px 20px !important;
+    border-radius: 18px !important;
+  }
+
+  .sc-header-title {
+    font-size: 17px !important;
+  }
+
+  .sc-header {
+    height: auto !important;
+    min-height: 56px;
+    padding-top: 10px !important;
+    padding-bottom: 10px !important;
+  }
+
+  .sc-content-viewport {
+    padding: 12px !important;
+  }
+
+  .sc-metrics-grid {
+    grid-template-columns: 1fr !important;
+    gap: 12px !important;
+  }
+
+  .sc-metric-value {
+    font-size: 22px !important;
+  }
+
+  .sc-panel-card {
+    padding: 16px !important;
+    border-radius: 16px !important;
+  }
+
+  .sc-modal-overlay {
+    align-items: flex-end !important;
+    padding: 0 !important;
+  }
+
+  .sc-modal-card {
+    border-radius: 20px 20px 0 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    padding: 20px 16px max(20px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .sc-search-header {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .sc-search-input-group {
+    max-width: none !important;
+  }
+
+  .sc-content-viewport input,
+  .sc-content-viewport select,
+  .sc-login-page input {
+    font-size: 16px !important;
+  }
+
+  .sc-bay-item {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 8px !important;
+  }
+
+  .sc-bay-usage {
+    align-self: flex-start !important;
+  }
+}
+
+/* Desktop — hide hamburger */
+@media (min-width: 1024px) {
+  .sc-menu-button {
+    display: none !important;
+  }
+
+  .sc-sidebar-backdrop {
+    display: none !important;
+  }
+}
+
+/* iPad landscape / small laptop */
+@media (min-width: 641px) and (max-width: 1023px) {
+  .sc-metrics-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  .sc-content-viewport {
+    padding: 20px !important;
+  }
+}

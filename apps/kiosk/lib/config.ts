@@ -42,3 +42,22 @@ export function validateKioskLogin(username: string, password: string): boolean 
 export function isKioskAuthConfigured(): boolean {
   return Boolean(process.env.NEXT_PUBLIC_KIOSK_USERNAME && process.env.NEXT_PUBLIC_KIOSK_PASSWORD);
 }
+
+export const KIOSK_AUTH_STORAGE_KEY = 'kiosk_admin_authenticated';
+
+export function persistKioskLogin(): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(KIOSK_AUTH_STORAGE_KEY, 'true');
+  }
+}
+
+export function clearKioskLogin(): void {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(KIOSK_AUTH_STORAGE_KEY);
+  }
+}
+
+export function isKioskLoginPersisted(): boolean {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(KIOSK_AUTH_STORAGE_KEY) === 'true';
+}
