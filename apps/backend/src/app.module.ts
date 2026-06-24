@@ -7,6 +7,7 @@ import { ChargingService } from './modules/charging/charging.service';
 import { ChargingController } from './modules/charging/charging.controller';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { RfidService } from './modules/charging/rfid.service';
+import { OcppTraceService } from './modules/charging/ocpp-trace.service';
 import { HealthController } from './modules/health/health.controller';
 import { WatchdogModule } from './modules/watchdog/watchdog.module';
 import { SteveOcppAdapter } from '@packages/ocpp-adapter';
@@ -25,6 +26,7 @@ import { SteveOcppAdapter } from '@packages/ocpp-adapter';
     ChargerGateway,
     ChargingService,
     RfidService,
+    OcppTraceService,
     // Dependency Injection Binding for the OCPP Adapter interface
     {
       provide: 'IChargerController',

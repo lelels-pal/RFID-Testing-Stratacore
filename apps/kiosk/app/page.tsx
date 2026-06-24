@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload } from '@packages/shared';
+import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload, OcppTraceEntry } from '@packages/shared';
 import {
   getChargerConfigs,
   STATION_NAME,
@@ -22,6 +22,7 @@ const WsEvents = {
   SESSION_COMPLETED: 'session:completed',
   SESSION_ERROR: 'session:error',
   RFID_AUTH_DENIED: 'rfid:auth_denied',
+  OCPP_TRACE: 'ocpp:trace',
   SUBSCRIBE_CHARGER: 'subscribe:charger',
 };
 
@@ -73,6 +74,50 @@ function getBayLabel(charger: ChargerDefinition, index: number): string {
   return `Bay A${index} (${charger.chargerId})`;
 }
 
+function formatOcppPayload(payload: unknown): string {
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return String(payload);
+  }
+}
+
+function getOcppTraceLabel(entry: OcppTraceEntry): string {
+  if (entry.action) return entry.action;
+  return entry.messageType;
+}
+
+function getOcppTraceSummary(entry: OcppTraceEntry): string {
+  const payload = entry.payload as Record<string, unknown> | null;
+  if (!payload) return entry.direction === 'incoming' ? 'from charger' : 'to charger';
+
+  if (payload.meterStop != null && payload.meterStart != null) {
+    const kwh = (Number(payload.meterStop) - Number(payload.meterStart)) / 1000;
+    return `meterStop: ${payload.meterStop} Wh (${kwh.toFixed(4)} kWh)`;
+  }
+  if (payload.meterStop != null) return `meterStop: ${payload.meterStop} Wh`;
+  if (payload.meterStart != null) return `meterStart: ${payload.meterStart} Wh`;
+
+  const meterValues = payload.meterValue as Array<{ sampledValue?: Array<{ measurand?: string; value?: string; unit?: string }> }> | undefined;
+  if (Array.isArray(meterValues)) {
+    const samples = meterValues.flatMap((mv) => mv.sampledValue || []);
+    const energy = samples.find((s) => s.measurand === 'Energy.Active.Import.Register');
+    if (energy?.value != null) {
+      const wh = Number(energy.value);
+      const unit = energy.unit || 'Wh';
+      const kwh = unit.toLowerCase() === 'kwh' ? wh : wh / 1000;
+      return `Energy: ${energy.value} ${unit} (${kwh.toFixed(4)} kWh)`;
+    }
+  }
+
+  if (payload.idTag) return `idTag: ${payload.idTag}`;
+  const idTagInfo = payload.idTagInfo as { status?: string } | undefined;
+  if (idTagInfo?.status) return `status: ${idTagInfo.status}`;
+  if (payload.status) return `status: ${payload.status}`;
+  if (payload.transactionId != null) return `transactionId: ${payload.transactionId}`;
+  return entry.direction === 'incoming' ? 'from charger' : 'to charger';
+}
+
 export default function AdminDashboardPage() {
   // Authentication State
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -116,6 +161,9 @@ export default function AdminDashboardPage() {
   const [chargerConnections, setChargerConnections] = useState<Record<string, ChargerConnectionInfo>>({});
   const [rfidAlerts, setRfidAlerts] = useState<WsRfidAuthDeniedPayload[]>([]);
   const [rfidDeniedModal, setRfidDeniedModal] = useState<WsRfidAuthDeniedPayload | null>(null);
+  const [ocppTrace, setOcppTrace] = useState<OcppTraceEntry[]>([]);
+  const [showAllOcppPackets, setShowAllOcppPackets] = useState(true);
+  const [expandedOcppKey, setExpandedOcppKey] = useState<string | null>(null);
 
   // Socket reference
   const socketRef = useRef<Socket | null>(null);
@@ -149,6 +197,18 @@ export default function AdminDashboardPage() {
     }
   };
 
+  const fetchOcppTrace = async () => {
+    try {
+      const query = showAllOcppPackets ? 'limit=100' : 'limit=100&rfidOnly=true';
+      const res = await fetch(`${backendUrl}/api/v1/charging/ocpp-trace?${query}`);
+      if (!res.ok) throw new Error('Failed to fetch OCPP trace');
+      const data: OcppTraceEntry[] = await res.json();
+      setOcppTrace(data);
+    } catch (err) {
+      console.error('Error fetching OCPP trace:', err);
+    }
+  };
+
   // Triggered when backend is resolved or on interval. Polls frequently so a
   // card's monthly consumption visibly counts up while a session is charging.
   useEffect(() => {
@@ -164,6 +224,11 @@ export default function AdminDashboardPage() {
     const interval = setInterval(fetchChargerConnections, 5000);
     return () => clearInterval(interval);
   }, [backendUrl]);
+
+  useEffect(() => {
+    if (!backendUrl) return;
+    fetchOcppTrace();
+  }, [backendUrl, showAllOcppPackets]);
 
   // Connect WebSockets
   useEffect(() => {
@@ -263,6 +328,10 @@ export default function AdminDashboardPage() {
     socket.on(WsEvents.RFID_AUTH_DENIED, (data: WsRfidAuthDeniedPayload) => {
       setRfidAlerts((prev) => [data, ...prev].slice(0, 20));
       setRfidDeniedModal(data);
+    });
+
+    socket.on(WsEvents.OCPP_TRACE, (entry: OcppTraceEntry) => {
+      setOcppTrace((prev) => [entry, ...prev].slice(0, 100));
     });
 
     return () => {
@@ -508,6 +577,9 @@ export default function AdminDashboardPage() {
   const onlinePct = CHARGER_CONFIGS.length > 0
     ? Math.round((onlineChargersCount / CHARGER_CONFIGS.length) * 100)
     : 0;
+  const visibleOcppTrace = showAllOcppPackets
+    ? ocppTrace
+    : ocppTrace.filter((entry) => entry.isRfidRelated);
 
   // ═══════════════════════════════════════════════════════════════
   // LOGIN VIEW RENDER
@@ -961,8 +1033,129 @@ export default function AdminDashboardPage() {
                       </div>
                     </div>
                   </div>
+
                 </div>
 
+              </div>
+
+              {/* OCPP Packet Trace — full width for readable packet data */}
+              <div style={dashStyles.panelCard}>
+                <div style={dashStyles.ocppPanelHeader}>
+                  <div>
+                    <h3 style={dashStyles.panelTitle}>
+                      OCPP PACKET TRACE
+                      {visibleOcppTrace.length > 0 && (
+                        <span style={dashStyles.ocppTraceCount}>{visibleOcppTrace.length}</span>
+                      )}
+                    </h3>
+                    <p style={{ fontSize: 11, color: '#64748b', margin: '6px 0 0' }}>
+                      Live OCPP WebSocket traffic between chargers and the central system — every message in and out.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                    <div style={dashStyles.ocppFilterGroup}>
+                      <button
+                        type="button"
+                        onClick={() => setShowAllOcppPackets(true)}
+                        style={{
+                          ...dashStyles.ocppFilterBtn,
+                          ...(showAllOcppPackets ? dashStyles.ocppFilterBtnActive : {}),
+                        }}
+                      >
+                        All packets
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowAllOcppPackets(false)}
+                        style={{
+                          ...dashStyles.ocppFilterBtn,
+                          ...(!showAllOcppPackets ? dashStyles.ocppFilterBtnActive : {}),
+                        }}
+                      >
+                        RFID only
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOcppTrace([]);
+                        setExpandedOcppKey(null);
+                      }}
+                      style={dashStyles.panelViewAll}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+
+                <div style={dashStyles.ocppTraceList}>
+                  {visibleOcppTrace.map((entry, index) => {
+                    const traceKey = `${entry.timestamp}-${entry.chargerId}-${entry.uniqueId || entry.messageType}-${index}`;
+                    const isExpanded = expandedOcppKey === traceKey;
+                    const directionColor = entry.direction === 'incoming' ? '#3b82f6' : '#8b5cf6';
+                    const rfidHighlight = entry.isRfidRelated ? '#818cf8' : '#94a3b8';
+                    const rawPacket = entry.raw || JSON.stringify([entry.messageType, entry.uniqueId, entry.action, entry.payload]);
+
+                    return (
+                      <div
+                        key={traceKey}
+                        style={{
+                          ...dashStyles.ocppTraceItem,
+                          borderLeft: `4px solid ${entry.isRfidRelated ? rfidHighlight : directionColor}`,
+                        }}
+                      >
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setExpandedOcppKey(isExpanded ? null : traceKey)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              setExpandedOcppKey(isExpanded ? null : traceKey);
+                            }
+                          }}
+                          style={dashStyles.ocppTraceHeader}
+                        >
+                          <div style={dashStyles.ocppTraceHeaderTop}>
+                            <span style={{ ...dashStyles.ocppTraceAction, color: entry.isRfidRelated ? '#4338ca' : '#0f172a' }}>
+                              {getOcppTraceLabel(entry)}
+                              {entry.isRfidRelated && (
+                                <span style={dashStyles.ocppRfidBadge}>RFID</span>
+                              )}
+                            </span>
+                            <span style={dashStyles.alertTime}>
+                              {new Date(entry.timestamp).toLocaleTimeString()}
+                            </span>
+                          </div>
+                          <div style={dashStyles.ocppTraceMeta}>
+                            <span style={{ color: directionColor, fontWeight: 700 }}>
+                              {entry.direction === 'incoming' ? '← IN' : '→ OUT'}
+                            </span>
+                            <span>{entry.chargerId}</span>
+                            <span>{entry.messageType}</span>
+                            <span>{getOcppTraceSummary(entry)}</span>
+                          </div>
+                        </div>
+                        <div style={dashStyles.ocppTraceRawPreview}>{rawPacket}</div>
+
+                        {isExpanded && (
+                          <div style={dashStyles.ocppTraceBody}>
+                            <div style={dashStyles.ocppTraceSectionLabel}>Parsed payload</div>
+                            <pre style={dashStyles.ocppTracePre}>{formatOcppPayload(entry.payload)}</pre>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {visibleOcppTrace.length === 0 && (
+                    <div style={{ padding: 20, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>
+                      {showAllOcppPackets
+                        ? 'No OCPP packets yet — connect a charger or tap an RFID card to see traffic.'
+                        : 'No RFID packets yet — tap a registered card on the charger reader.'}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -2125,6 +2318,134 @@ const dashStyles = {
     fontSize: 11,
     color: '#475569',
     lineHeight: 1.4,
+  },
+  ocppPanelHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 16,
+    marginBottom: 16,
+    flexWrap: 'wrap' as const,
+  },
+  ocppTraceList: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 10,
+    maxHeight: 640,
+    overflowY: 'auto' as const,
+    width: '100%',
+  },
+  ocppTraceCount: {
+    marginLeft: 8,
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#64748b',
+    backgroundColor: '#e2e8f0',
+    padding: '2px 8px',
+    borderRadius: 10,
+    verticalAlign: 'middle' as const,
+  },
+  ocppFilterGroup: {
+    display: 'flex',
+    gap: 4,
+    backgroundColor: '#f1f5f9',
+    padding: 3,
+    borderRadius: 8,
+  },
+  ocppFilterBtn: {
+    border: 'none',
+    background: 'transparent',
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: 600,
+    padding: '4px 10px',
+    borderRadius: 6,
+    cursor: 'pointer',
+  },
+  ocppFilterBtnActive: {
+    backgroundColor: '#ffffff',
+    color: '#4338ca',
+    boxShadow: '0 1px 2px rgba(15, 23, 42, 0.08)',
+  },
+  ocppTraceItem: {
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    overflow: 'visible',
+    border: '1px solid #e2e8f0',
+  },
+  ocppTraceHeader: {
+    width: '100%',
+    padding: '10px 12px 0',
+    cursor: 'pointer',
+    color: '#0f172a',
+  },
+  ocppTraceHeaderTop: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  ocppTraceAction: {
+    fontSize: 12,
+    fontWeight: 700,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  ocppRfidBadge: {
+    fontSize: 9,
+    fontWeight: 800,
+    color: '#4338ca',
+    backgroundColor: '#e0e7ff',
+    padding: '2px 6px',
+    borderRadius: 6,
+  },
+  ocppTraceMeta: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    gap: 8,
+    fontSize: 10,
+    color: '#64748b',
+  },
+  ocppTraceRawPreview: {
+    margin: '8px 12px 12px',
+    padding: '10px 12px',
+    backgroundColor: '#0f172a',
+    color: '#e2e8f0',
+    borderRadius: 6,
+    fontSize: 11,
+    lineHeight: 1.5,
+    overflowX: 'auto' as const,
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+    fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+    display: 'block',
+    minHeight: 24,
+  },
+  ocppTraceBody: {
+    padding: '0 12px 12px',
+    borderTop: '1px solid #e2e8f0',
+  },
+  ocppTraceSectionLabel: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: '#94a3b8',
+    textTransform: 'uppercase' as const,
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  ocppTracePre: {
+    margin: 0,
+    padding: 10,
+    backgroundColor: '#0f172a',
+    color: '#e2e8f0',
+    borderRadius: 8,
+    fontSize: 10,
+    lineHeight: 1.45,
+    overflowX: 'auto' as const,
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+    fontFamily: 'Consolas, Monaco, "Courier New", monospace',
   },
   healthLayout: {
     display: 'flex',

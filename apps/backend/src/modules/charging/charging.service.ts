@@ -1,12 +1,13 @@
 import { Injectable, Logger, Inject, OnModuleInit } from '@nestjs/common';
-import { IChargerController, MeterUpdateEvent, SteveOcppAdapter } from '@packages/ocpp-adapter';
+import { IChargerController, MeterUpdateEvent, SteveOcppAdapter, StopTransactionEvent } from '@packages/ocpp-adapter';
 import { RedisService } from '../redis/redis.service';
 import { ChargerGateway } from './charging.gateway';
 import { RfidService } from './rfid.service';
 import { ChargeStartWatchdogService } from '../watchdog/charge-start-watchdog.service';
 import { StaleSessionWatchdogService, TrackedSession } from '../watchdog/stale-session-watchdog.service';
+import { OcppTraceService } from './ocpp-trace.service';
 import { WatchdogEventLogService } from '../watchdog/watchdog-event-log.service';
-import { WebSocketEvents, OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus, ChargerConnectionInfo } from '@packages/shared';
+import { WebSocketEvents, OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus, ChargerConnectionInfo, OcppTraceEntry } from '@packages/shared';
 
 @Injectable()
 export class ChargingService implements OnModuleInit {
@@ -30,6 +31,7 @@ export class ChargingService implements OnModuleInit {
     private readonly chargeStartWatchdog: ChargeStartWatchdogService,
     private readonly staleSessionWatchdog: StaleSessionWatchdogService,
     private readonly watchdogEvents: WatchdogEventLogService,
+    private readonly ocppTrace: OcppTraceService,
   ) {}
 
   // Tracks chargers that currently have a live session, so idle status
@@ -103,46 +105,15 @@ export class ChargingService implements OnModuleInit {
     });
 
     realtimeAdapter.on('meterValues', async (telemetry: MeterUpdateEvent) => {
-      // 1. Forward the telemetry to WS clients
       this.wsGateway.emitMeterUpdate(telemetry.chargerId, telemetry);
 
-      // 2. Accumulate energy usage to the RFID card in real-time
-      const rfidCardId = this.chargerToRfidMap.get(telemetry.chargerId);
-      if (rfidCardId) {
-        const lastEnergy = this.sessionEnergyMap.get(telemetry.chargerId) || 0.0;
-        const currentEnergy = telemetry.energyDeliveredKwh;
-        const delta = Math.max(0, currentEnergy - lastEnergy);
-
-        if (delta > 0) {
-          try {
-            const card = await this.rfidService.logUsage(rfidCardId, delta);
-            this.sessionEnergyMap.set(telemetry.chargerId, currentEnergy);
-
-            this.logger.debug(
-              `RFID ${rfidCardId} consumed incremental +${delta.toFixed(4)} kWh. Total this month: ${card.currentMonthKwhConsumed.toFixed(4)} / ${card.monthlyKwhLimit} kWh`
-            );
-
-            // 3. Stop charger immediately if limit is exceeded mid-session
-            if (card.currentMonthKwhConsumed >= card.monthlyKwhLimit) {
-              this.logger.warn(
-                `RFID Card ${rfidCardId} exceeded monthly limit of ${card.monthlyKwhLimit} kWh. Auto-stopping charger ${telemetry.chargerId}.`
-              );
-              
-              // Force stop the charger
-              await this.triggerRemoteStop(telemetry.chargerId);
-
-              // Notify the frontend of quota exhaustion shutdown
-              this.wsGateway.emitChargerStatus(telemetry.chargerId, WebSocketEvents.SESSION_ERROR, {
-                chargerId: telemetry.chargerId,
-                connectorId: telemetry.connectorId,
-                message: `Session stopped automatically: Monthly limit of ${card.monthlyKwhLimit} kWh has been reached.`,
-              });
-            }
-          } catch (err) {
-            this.logger.error(`Failed to update RFID usage for card ${rfidCardId}:`, err);
-          }
-        }
+      // Live session totals from MeterValues during charging.
+      // Final kWh is reconciled from StopTransaction meterStop — skip duplicate RFID logging.
+      if (telemetry.isFinal) {
+        return;
       }
+
+      await this.applyIncrementalRfidEnergy(telemetry);
     });
 
     realtimeAdapter.on(
@@ -180,7 +151,13 @@ export class ChargingService implements OnModuleInit {
       }
     );
 
-    realtimeAdapter.on('startTransaction', async (event: { chargerId: string; connectorId: number; transactionId?: number; idTag?: string }) => {
+    realtimeAdapter.on('startTransaction', async (event: {
+      chargerId: string;
+      connectorId: number;
+      transactionId?: number;
+      idTag?: string;
+      meterStartWh?: number;
+    }) => {
       // Already linked by the kiosk/guest remote-start flow — nothing to do.
       if (this.chargerToRfidMap.has(event.chargerId)) {
         return;
@@ -198,14 +175,18 @@ export class ChargingService implements OnModuleInit {
 
         this.logger.log(
           `Physical RFID tap on ${event.chargerId} linked to card ${card.rfidCardId}. ` +
-          `Quota: ${card.currentMonthKwhConsumed.toFixed(2)} / ${card.monthlyKwhLimit} kWh.`
+          `Quota: ${card.currentMonthKwhConsumed.toFixed(2)} / ${card.monthlyKwhLimit} kWh. ` +
+          `meterStart: ${event.meterStartWh ?? 'n/a'} Wh`
         );
       } catch (err) {
         this.logger.error(`Failed to link RFID card for startTransaction on ${event.chargerId}:`, err);
       }
     });
 
-    realtimeAdapter.on('stopTransaction', (event: { chargerId: string; connectorId: number }) => {
+    realtimeAdapter.on('stopTransaction', async (event: StopTransactionEvent) => {
+      // Authoritative session total from StopTransaction meterStop (not Heartbeat).
+      await this.applyFinalRfidEnergy(event);
+
       this.chargeStartWatchdog.clear(event.chargerId);
       this.clearSessionMetadata(event.chargerId);
       this.chargerToRfidMap.delete(event.chargerId);
@@ -215,9 +196,77 @@ export class ChargingService implements OnModuleInit {
       this.wsGateway.emitChargerStatus(event.chargerId, WebSocketEvents.SESSION_COMPLETED, {
         chargerId: event.chargerId,
         connectorId: event.connectorId,
-        message: 'Charging session stopped successfully.',
+        message: `Charging session stopped. Delivered ${event.energyDeliveredKwh.toFixed(4)} kWh.`,
       });
     });
+
+    realtimeAdapter.on('ocppTrace', (entry: OcppTraceEntry) => {
+      this.ocppTrace.add(entry);
+      this.wsGateway.emitOcppTrace(entry);
+    });
+  }
+
+  private async applyIncrementalRfidEnergy(telemetry: MeterUpdateEvent): Promise<void> {
+    const rfidCardId = this.chargerToRfidMap.get(telemetry.chargerId);
+    if (!rfidCardId) return;
+
+    const lastEnergy = this.sessionEnergyMap.get(telemetry.chargerId) ?? 0;
+    const currentEnergy = telemetry.energyDeliveredKwh;
+    const delta = Math.max(0, currentEnergy - lastEnergy);
+    if (delta <= 0) return;
+
+    try {
+      const card = await this.rfidService.logUsage(rfidCardId, delta);
+      this.sessionEnergyMap.set(telemetry.chargerId, currentEnergy);
+
+      this.logger.debug(
+        `RFID ${rfidCardId} +${delta.toFixed(4)} kWh via MeterValues ` +
+        `(register ${telemetry.energyRegisterWh ?? 'n/a'} Wh, start ${telemetry.meterStartWh ?? 'n/a'} Wh). ` +
+        `Monthly: ${card.currentMonthKwhConsumed.toFixed(4)} / ${card.monthlyKwhLimit} kWh`
+      );
+
+      if (card.currentMonthKwhConsumed >= card.monthlyKwhLimit) {
+        this.logger.warn(
+          `RFID Card ${rfidCardId} exceeded monthly limit of ${card.monthlyKwhLimit} kWh. Auto-stopping charger ${telemetry.chargerId}.`
+        );
+        await this.triggerRemoteStop(telemetry.chargerId);
+        this.wsGateway.emitChargerStatus(telemetry.chargerId, WebSocketEvents.SESSION_ERROR, {
+          chargerId: telemetry.chargerId,
+          connectorId: telemetry.connectorId,
+          message: `Session stopped automatically: Monthly limit of ${card.monthlyKwhLimit} kWh has been reached.`,
+        });
+      }
+    } catch (err) {
+      this.logger.error(`Failed to update RFID usage for card ${rfidCardId}:`, err);
+    }
+  }
+
+  private async applyFinalRfidEnergy(event: StopTransactionEvent): Promise<void> {
+    const rfidCardId = this.chargerToRfidMap.get(event.chargerId);
+    if (!rfidCardId) return;
+
+    const lastEnergy = this.sessionEnergyMap.get(event.chargerId) ?? 0;
+    const finalEnergy = event.energyDeliveredKwh;
+    const delta = Math.max(0, finalEnergy - lastEnergy);
+    if (delta <= 0) {
+      this.logger.log(
+        `StopTransaction on ${event.chargerId}: ${finalEnergy.toFixed(4)} kWh total ` +
+        `(meterStart ${event.meterStartWh ?? 'n/a'} Wh, meterStop ${event.meterStopWh ?? 'n/a'} Wh). No remaining delta.`
+      );
+      return;
+    }
+
+    try {
+      const card = await this.rfidService.logUsage(rfidCardId, delta);
+      this.sessionEnergyMap.set(event.chargerId, finalEnergy);
+      this.logger.log(
+        `StopTransaction on ${event.chargerId}: +${delta.toFixed(4)} kWh final delta ` +
+        `(${finalEnergy.toFixed(4)} kWh session total from meterStop). ` +
+        `RFID ${rfidCardId} monthly: ${card.currentMonthKwhConsumed.toFixed(4)} / ${card.monthlyKwhLimit} kWh`
+      );
+    } catch (err) {
+      this.logger.error(`Failed to finalize RFID usage for card ${rfidCardId}:`, err);
+    }
   }
 
   /**
@@ -451,5 +500,9 @@ export class ChargingService implements OnModuleInit {
   getChargersStatus(chargerIds: string[]): ChargerConnectionInfo[] {
     const adapter = this.ocppAdapter as SteveOcppAdapter;
     return adapter.listChargerConnections(chargerIds);
+  }
+
+  getOcppTrace(limit = 50, rfidOnly = false) {
+    return this.ocppTrace.list(limit, rfidOnly);
   }
 }

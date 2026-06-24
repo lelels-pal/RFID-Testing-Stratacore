@@ -17,6 +17,16 @@ export class ChargingController {
     return this.rfidService.getAll();
   }
 
+  @Get('ocpp-trace')
+  async getOcppTrace(
+    @Query('limit') limit?: string,
+    @Query('rfidOnly') rfidOnly?: string,
+  ) {
+    const parsedLimit = limit ? Number(limit) : 50;
+    const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
+    return this.chargingService.getOcppTrace(safeLimit, rfidOnly === 'true');
+  }
+
   @Get('chargers')
   async listChargers(@Query('ids') ids?: string) {
     const chargerIds = ids

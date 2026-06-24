@@ -1,7 +1,14 @@
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
-import { OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus } from '@packages/shared';
+import {
+  OcppRemoteStartResult,
+  OcppRemoteStopResult,
+  ChargerStatus,
+  OcppTraceEntry,
+  OcppMessageType,
+  OcppTraceDirection,
+} from '@packages/shared';
 
 export interface IChargerController {
   remoteStart(chargerId: string, connectorId: number, idTag: string): Promise<OcppRemoteStartResult>;
@@ -21,6 +28,22 @@ export interface MeterUpdateEvent {
   currentAmps: number;
   voltageVolts: number;
   estimatedCost: number;
+  /** OCPP source used for energyDeliveredKwh — never Heartbeat. */
+  energySource: 'meterValues' | 'stopTransaction';
+  /** True on the final frame derived from StopTransaction meterStop. */
+  isFinal?: boolean;
+  meterStartWh?: number;
+  meterStopWh?: number;
+  energyRegisterWh?: number;
+}
+
+export interface StopTransactionEvent {
+  chargerId: string;
+  connectorId: number;
+  transactionId?: number;
+  meterStartWh?: number;
+  meterStopWh?: number;
+  energyDeliveredKwh: number;
 }
 
 interface PendingCall {
@@ -65,6 +88,15 @@ export interface AdapterConfig {
 const CALL_MESSAGE = 2;
 const CALL_RESULT_MESSAGE = 3;
 const CALL_ERROR_MESSAGE = 4;
+
+const RFID_OCPP_ACTIONS = new Set([
+  'Authorize',
+  'StartTransaction',
+  'StopTransaction',
+  'RemoteStartTransaction',
+]);
+
+const ENERGY_OCPP_ACTIONS = new Set(['MeterValues', 'StartTransaction', 'StopTransaction']);
 
 export class SteveOcppAdapter extends EventEmitter implements IChargerController {
   private readonly wss: WebSocketServer;
@@ -341,18 +373,39 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
     const messageType = message[0];
     if (messageType === CALL_MESSAGE) {
       const [, uniqueId, action, payload] = message;
+      this.traceMessage(charger, 'incoming', 'CALL', rawMessage, uniqueId, action, payload);
       void this.handleIncomingCall(charger, uniqueId, action, payload);
       return;
     }
 
     if (messageType === CALL_RESULT_MESSAGE) {
       const [, uniqueId, payload] = message;
+      const pending = charger.pendingCalls.get(uniqueId);
+      this.traceMessage(
+        charger,
+        'incoming',
+        'CALLRESULT',
+        rawMessage,
+        uniqueId,
+        pending?.action,
+        payload
+      );
       this.resolvePendingCall(charger, uniqueId, payload);
       return;
     }
 
     if (messageType === CALL_ERROR_MESSAGE) {
-      const [, uniqueId, errorCode, errorDescription] = message;
+      const [, uniqueId, errorCode, errorDescription, details] = message;
+      const pending = charger.pendingCalls.get(uniqueId);
+      this.traceMessage(
+        charger,
+        'incoming',
+        'CALLERROR',
+        rawMessage,
+        uniqueId,
+        pending?.action,
+        { errorCode, errorDescription, details }
+      );
       this.rejectPendingCall(charger, uniqueId, `${errorCode}: ${errorDescription}`);
     }
   }
@@ -377,6 +430,7 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
           return;
 
         case 'Heartbeat':
+          // Keep-alive only — no energy data; kWh comes from MeterValues and StopTransaction.
           charger.lastSeenAt = new Date().toISOString();
           this.sendCallResult(charger, uniqueId, {
             currentTime: new Date().toISOString(),
@@ -422,11 +476,12 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
 
         case 'StartTransaction': {
           const transactionId = Math.floor(Math.random() * 1_000_000);
+          const meterStartWh = payload.meterStart != null ? Number(payload.meterStart) : undefined;
           charger.activeTransactionId = transactionId;
           charger.activeSessionId = payload.idTag || charger.activeSessionId || `TX-${transactionId}`;
           charger.connectorId = payload.connectorId || charger.connectorId;
-          charger.meterStartWh = payload.meterStart;
-          charger.latestEnergyWh = payload.meterStart;
+          charger.meterStartWh = meterStartWh;
+          charger.latestEnergyWh = meterStartWh ?? charger.latestEnergyWh;
           charger.chargingStartAt = Date.now();
           charger.latestTimestamp = payload.timestamp || new Date().toISOString();
           charger.status = 'Charging';
@@ -436,6 +491,7 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
             connectorId: charger.connectorId,
             transactionId,
             idTag: payload.idTag,
+            meterStartWh,
           });
           this.emit('status', {
             chargerId: charger.chargerId,
@@ -452,13 +508,45 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
           return;
         }
 
-        case 'StopTransaction':
-          this.emit('stopTransaction', {
+        case 'StopTransaction': {
+          const meterStartWh = charger.meterStartWh;
+          const meterStopWh = payload.meterStop != null ? Number(payload.meterStop) : charger.latestEnergyWh;
+          const energyDeliveredKwh = this.computeDeliveredKwh(meterStartWh, meterStopWh);
+          const stopEvent: StopTransactionEvent = {
             chargerId: charger.chargerId,
             connectorId: charger.connectorId,
             transactionId: payload.transactionId,
-            meterStop: payload.meterStop,
-          });
+            meterStartWh,
+            meterStopWh,
+            energyDeliveredKwh,
+          };
+
+          this.emit('stopTransaction', stopEvent);
+
+          // Authoritative session total from meterStop (not Heartbeat).
+          if (meterStopWh != null) {
+            const durationSeconds = charger.chargingStartAt
+              ? Math.max(0, Math.floor((Date.now() - charger.chargingStartAt) / 1000))
+              : 0;
+            this.emit('meterValues', {
+              chargerId: charger.chargerId,
+              connectorId: charger.connectorId,
+              sessionId: charger.activeSessionId || String(charger.activeTransactionId || 'unknown'),
+              timestamp: payload.timestamp || new Date().toISOString(),
+              powerKw: Number(((charger.latestPowerW ?? 0) / 1000).toFixed(3)),
+              energyDeliveredKwh,
+              durationSeconds,
+              currentAmps: Number((charger.latestCurrentA ?? 0).toFixed(2)),
+              voltageVolts: Number((charger.latestVoltageV ?? 0).toFixed(2)),
+              estimatedCost: Number((energyDeliveredKwh * this.pricePerKwh).toFixed(2)),
+              energySource: 'stopTransaction',
+              isFinal: true,
+              meterStartWh,
+              meterStopWh,
+              energyRegisterWh: meterStopWh,
+            });
+          }
+
           charger.activeTransactionId = undefined;
           charger.activeSessionId = undefined;
           charger.chargingStartAt = undefined;
@@ -475,6 +563,7 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
             },
           });
           return;
+        }
 
         case 'MeterValues':
           this.handleMeterValues(charger, payload);
@@ -525,9 +614,18 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
       currentAmps: Number(currentA.toFixed(2)),
       voltageVolts: Number(voltageV.toFixed(2)),
       estimatedCost: Number((energyDeliveredKwh * this.pricePerKwh).toFixed(2)),
+      energySource: 'meterValues',
+      meterStartWh: charger.meterStartWh,
+      energyRegisterWh: energyWh,
     };
 
     this.emit('meterValues', update);
+  }
+
+  private computeDeliveredKwh(meterStartWh?: number, meterStopOrRegisterWh?: number): number {
+    if (meterStopOrRegisterWh == null) return 0;
+    const startWh = meterStartWh ?? meterStopOrRegisterWh;
+    return Number((Math.max(0, meterStopOrRegisterWh - startWh) / 1000).toFixed(4));
   }
 
   private mapStatus(status: string): ChargerStatus {
@@ -567,11 +665,16 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
   }
 
   private sendCallResult(charger: ChargerConnectionState, uniqueId: string, payload: unknown) {
-    charger.socket?.send(JSON.stringify([CALL_RESULT_MESSAGE, uniqueId, payload]));
+    const raw = JSON.stringify([CALL_RESULT_MESSAGE, uniqueId, payload]);
+    this.traceMessage(charger, 'outgoing', 'CALLRESULT', raw, uniqueId, undefined, payload);
+    charger.socket?.send(raw);
   }
 
   private sendCallError(charger: ChargerConnectionState, uniqueId: string, code: string, description: string) {
-    charger.socket?.send(JSON.stringify([CALL_ERROR_MESSAGE, uniqueId, code, description, {}]));
+    const payload = { errorCode: code, errorDescription: description, details: {} };
+    const raw = JSON.stringify([CALL_ERROR_MESSAGE, uniqueId, code, description, {}]);
+    this.traceMessage(charger, 'outgoing', 'CALLERROR', raw, uniqueId, undefined, payload);
+    charger.socket?.send(raw);
   }
 
   private async sendCall<T>(charger: ChargerConnectionState, action: string, payload: unknown): Promise<T> {
@@ -581,7 +684,8 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
     }
 
     const uniqueId = randomUUID();
-    const message = JSON.stringify([CALL_MESSAGE, uniqueId, action, payload]);
+    const raw = JSON.stringify([CALL_MESSAGE, uniqueId, action, payload]);
+    this.traceMessage(charger, 'outgoing', 'CALL', raw, uniqueId, action, payload);
 
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -596,8 +700,52 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
         timeout,
       });
 
-      socket.send(message);
+      socket.send(raw);
     });
+  }
+
+  private traceMessage(
+    charger: ChargerConnectionState,
+    direction: OcppTraceDirection,
+    messageType: OcppMessageType,
+    raw: string,
+    uniqueId?: string,
+    action?: string,
+    payload?: unknown
+  ) {
+    const entry: OcppTraceEntry = {
+      timestamp: new Date().toISOString(),
+      chargerId: charger.chargerId,
+      direction,
+      messageType,
+      action,
+      uniqueId,
+      payload: payload ?? null,
+      raw,
+      isRfidRelated: this.isRfidRelated(action, payload),
+      hasEnergyData: this.hasEnergyData(action, payload),
+    };
+    this.emit('ocppTrace', entry);
+  }
+
+  private hasEnergyData(action?: string, payload?: unknown): boolean {
+    if (action && ENERGY_OCPP_ACTIONS.has(action)) return true;
+    if (payload && typeof payload === 'object' && payload !== null) {
+      const record = payload as Record<string, unknown>;
+      if (record.meterStop != null || record.meterStart != null) return true;
+      if (Array.isArray(record.meterValue)) return true;
+    }
+    return false;
+  }
+
+  private isRfidRelated(action?: string, payload?: unknown): boolean {
+    if (action && RFID_OCPP_ACTIONS.has(action)) return true;
+    if (payload && typeof payload === 'object' && payload !== null) {
+      const record = payload as Record<string, unknown>;
+      if (typeof record.idTag === 'string') return true;
+      if (record.idTagInfo) return true;
+    }
+    return false;
   }
 
   private resolvePendingCall(charger: ChargerConnectionState, uniqueId: string, payload: unknown) {

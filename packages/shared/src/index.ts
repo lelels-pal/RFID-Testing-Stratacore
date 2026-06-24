@@ -46,9 +46,27 @@ export enum WebSocketEvents {
   SESSION_COMPLETED = 'session:completed',   // Charging stopped/finished
   SESSION_ERROR = 'session:error',           // Failure event (e.g. timeout, fault)
   RFID_AUTH_DENIED = 'rfid:auth_denied',     // Unregistered/blocked RFID tap rejected
+  OCPP_TRACE = 'ocpp:trace',               // Raw OCPP packet trace for debugging (kiosk admin)
 
   // From Client to Server
   SUBSCRIBE_CHARGER = 'subscribe:charger',   // Client registers for updates to a specific chargerId
+}
+
+export type OcppMessageType = 'CALL' | 'CALLRESULT' | 'CALLERROR';
+export type OcppTraceDirection = 'incoming' | 'outgoing';
+
+export interface OcppTraceEntry {
+  timestamp: string;
+  chargerId: string;
+  direction: OcppTraceDirection;
+  messageType: OcppMessageType;
+  action?: string;
+  uniqueId?: string;
+  payload: unknown;
+  raw: string;
+  isRfidRelated: boolean;
+  /** True when the packet carries meterStart, meterStop, or MeterValues energy data. */
+  hasEnergyData?: boolean;
 }
 
 export interface WsSessionClaimedPayload {
@@ -77,6 +95,12 @@ export interface WsMeterUpdatePayload {
   currentAmps: number;      // Current in Amperes
   voltageVolts: number;    // Voltage in Volts
   estimatedCost: number;    // Running cost calculations
+  /** OCPP source for energyDeliveredKwh — MeterValues or StopTransaction meterStop, never Heartbeat. */
+  energySource?: 'meterValues' | 'stopTransaction';
+  isFinal?: boolean;
+  meterStartWh?: number;
+  meterStopWh?: number;
+  energyRegisterWh?: number;
 }
 
 // --- Payment & Checkout Schemas ---

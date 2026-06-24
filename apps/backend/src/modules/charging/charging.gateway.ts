@@ -9,7 +9,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
-import { WebSocketEvents } from '@packages/shared';
+import { WebSocketEvents, OcppTraceEntry } from '@packages/shared';
 
 @WebSocketGateway({
   cors: {
@@ -71,5 +71,12 @@ export class ChargerGateway implements OnGatewayConnection, OnGatewayDisconnect 
   emitChargerStatus(chargerId: string, event: WebSocketEvents, payload: any) {
     const roomName = `charger_room:${chargerId}`;
     this.server.to(roomName).emit(event, payload);
+  }
+
+  /**
+   * Broadcasts raw OCPP packet traces to all connected admin clients (kiosk).
+   */
+  emitOcppTrace(entry: OcppTraceEntry) {
+    this.server.emit(WebSocketEvents.OCPP_TRACE, entry);
   }
 }
