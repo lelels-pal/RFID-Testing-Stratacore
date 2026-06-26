@@ -1,0 +1,133 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  Int       @id @default(autoincrement())
+  username            String    @unique @db.VarChar(50)
+  email               String    @unique @db.VarChar(100)
+  first_name          String?   @db.VarChar(50)
+  full_name           String    @db.VarChar(100)
+  hashed_password     String    @db.VarChar(255)
+  role                String    @default("customer") @db.VarChar(20)
+  customer_id         String?   @unique @db.VarChar(32)
+  rfid_tag            String?   @unique @db.VarChar(64)
+  is_active           Boolean   @default(true)
+  is_verified         Boolean   @default(false)
+  balance             Decimal?  @default(0.00) @db.Decimal(12, 2)
+  phone               String?   @db.VarChar(20)
+  registration_source String?   @db.VarChar(20)
+  guest_fingerprint   String?   @db.VarChar(128)
+  last_login          DateTime?
+  password_change     Int       @default(1)
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @default(now()) @updatedAt
+  client_account_id   Int?
+
+  energy_requests          OperatorEnergyRequest[] @relation("UserEnergyRequests")
+  reviewed_energy_requests OperatorEnergyRequest[] @relation("ReviewedEnergyRequests")
+
+  @@map("users")
+}
+
+model OperatorEnergyRequest {
+  id                  Int       @id @default(autoincrement())
+  user_id             Int
+  kwh_amount          Decimal   @db.Decimal(10, 3)
+  status              String    @default("pending") @db.VarChar(16)
+  admin_note          String?   @db.Text
+  reviewed_by_user_id Int?
+  reviewed_at         DateTime?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @default(now()) @updatedAt
+
+  user        User  @relation("UserEnergyRequests", fields: [user_id], references: [id], onDelete: Cascade)
+  reviewed_by User? @relation("ReviewedEnergyRequests", fields: [reviewed_by_user_id], references: [id], onDelete: SetNull)
+
+  @@index([user_id])
+  @@index([status])
+  @@map("operator_energy_requests")
+}
+
+model Station {
+  id                 Int      @id @default(autoincrement())
+  name               String   @db.VarChar(128)
+  location           String?  @db.VarChar(256)
+  address            String?  @db.VarChar(256)
+  operator           String?  @db.VarChar(128)
+  operational_status String?  @default("active") @db.VarChar(32)
+  rate_per_kwh       Decimal? @default(0) @db.Decimal(10, 4)
+  client_account_id  Int?
+  created_at         DateTime @default(now())
+  updated_at         DateTime @default(now()) @updatedAt
+
+  chargers Charger[]
+
+  @@map("stations")
+}
+
+model Charger {
+  id                 Int       @id @default(autoincrement())
+  station_id         Int
+  charger_id         String    @unique @db.VarChar(128)
+  slot_number        Int?
+  model              String?   @db.VarChar(128)
+  vendor             String?   @db.VarChar(128)
+  status             String    @default("Available") @db.VarChar(32)
+  num_connectors     Int       @default(1)
+  connector_1_status String?   @default("Available") @db.VarChar(32)
+  connector_2_status String?   @default("Available") @db.VarChar(32)
+  kw_rating          Int?
+  last_heartbeat     DateTime?
+  is_online          Boolean?
+  is_active          Boolean?
+  allow_local_start  Boolean?  @default(false)
+  created_at         DateTime  @default(now())
+  updated_at         DateTime?
+
+  station Station @relation(fields: [station_id], references: [id])
+
+  @@map("chargers")
+}
+
+model Session {
+  id                   Int       @id @default(autoincrement())
+  charge_point_id      String?   @db.VarChar(128)
+  station_id           Int?
+  status               String?   @db.VarChar(32)
+  start_time           DateTime?
+  end_time             DateTime?
+  energy_kwh           Decimal?  @db.Decimal(10, 4)
+  session_type         String?   @db.VarChar(32)
+  initiated_by_user_id Int?
+  transaction_id       String?   @db.VarChar(64)
+
+  @@map("sessions")
+}
+
+model CustomerActivity {
+  id             Int      @id @default(autoincrement())
+  user_id        Int
+  session_id     Int?
+  amount         Decimal? @db.Decimal(12, 2)
+  energy_kwh     Decimal? @db.Decimal(10, 4)
+  payment_method String?  @db.VarChar(32)
+  reference      String?  @db.VarChar(128)
+  occurred_at    DateTime @default(now())
+
+  @@map("customer_activities")
+}
+
+model Payment {
+  id         Int      @id @default(autoincrement())
+  session_id Int?
+  amount     Decimal? @db.Decimal(12, 2)
+  status     String?  @db.VarChar(32)
+
+  @@map("payments")
+}

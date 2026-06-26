@@ -7,6 +7,10 @@ import { ChargeStartWatchdogService } from '../watchdog/charge-start-watchdog.se
 import { StaleSessionWatchdogService, TrackedSession } from '../watchdog/stale-session-watchdog.service';
 import { OcppTraceService } from './ocpp-trace.service';
 import { WatchdogEventLogService } from '../watchdog/watchdog-event-log.service';
+import { SessionLogService } from '../session-log/session-log.service';
+import { OperatorRfidService } from '../operator-rfid/operator-rfid.service';
+import { PrismaService } from '../database/prisma.service';
+import { findUserByRfidTag } from '../users/user.mapper';
 import { WebSocketEvents, OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus, ChargerConnectionInfo, OcppTraceEntry } from '@packages/shared';
 
 @Injectable()
@@ -32,6 +36,9 @@ export class ChargingService implements OnModuleInit {
     private readonly staleSessionWatchdog: StaleSessionWatchdogService,
     private readonly watchdogEvents: WatchdogEventLogService,
     private readonly ocppTrace: OcppTraceService,
+    private readonly sessionLog: SessionLogService,
+    private readonly operatorRfid: OperatorRfidService,
+    private readonly prisma: PrismaService,
   ) {}
 
   // Tracks chargers that currently have a live session, so idle status
@@ -193,8 +200,33 @@ export class ChargingService implements OnModuleInit {
     });
 
     realtimeAdapter.on('stopTransaction', async (event: StopTransactionEvent) => {
-      // Authoritative session total from StopTransaction meterStop (not Heartbeat).
-      await this.applyFinalRfidEnergy(event);
+      const rfidCardId = this.chargerToRfidMap.get(event.chargerId);
+      const startedAt = this.sessionStartedAt.get(event.chargerId);
+      let cardholderName: string | undefined;
+      let userId: number | undefined;
+
+      if (this.prisma.isReady() && rfidCardId) {
+        const user = await findUserByRfidTag(this.prisma, rfidCardId);
+        cardholderName = user?.full_name;
+        userId = user?.id;
+        await this.operatorRfid.finalizeEnergy(event.chargerId, event.energyDeliveredKwh);
+      } else {
+        await this.applyFinalRfidEnergy(event);
+      }
+
+      if (event.energyDeliveredKwh > 0) {
+        await this.sessionLog.append({
+          sessionType: rfidCardId ? 'rfid' : 'guest',
+          chargerId: event.chargerId,
+          connectorId: event.connectorId,
+          rfidCardId,
+          cardholderName,
+          energyKwh: event.energyDeliveredKwh,
+          startedAt,
+          stopReason: 'stopTransaction',
+          userId,
+        });
+      }
 
       this.chargeStartWatchdog.clear(event.chargerId);
       this.clearSessionMetadata(event.chargerId);
@@ -218,6 +250,23 @@ export class ChargingService implements OnModuleInit {
   private async applyIncrementalRfidEnergy(telemetry: MeterUpdateEvent): Promise<void> {
     const rfidCardId = this.chargerToRfidMap.get(telemetry.chargerId);
     if (!rfidCardId) return;
+
+    if (this.prisma.isReady() && this.operatorRfid.getSessionContext(telemetry.chargerId)) {
+      const result = await this.operatorRfid.applyEnergyDelta(
+        telemetry.chargerId,
+        telemetry.energyDeliveredKwh,
+      );
+      this.sessionEnergyMap.set(telemetry.chargerId, telemetry.energyDeliveredKwh);
+      if (result.shouldStop) {
+        await this.triggerRemoteStop(telemetry.chargerId);
+        this.wsGateway.emitChargerStatus(telemetry.chargerId, WebSocketEvents.SESSION_ERROR, {
+          chargerId: telemetry.chargerId,
+          connectorId: telemetry.connectorId,
+          message: 'Session stopped: operator balance exhausted.',
+        });
+      }
+      return;
+    }
 
     const lastEnergy = this.sessionEnergyMap.get(telemetry.chargerId) ?? 0;
     const currentEnergy = telemetry.energyDeliveredKwh;
@@ -339,6 +388,13 @@ export class ChargingService implements OnModuleInit {
     this.chargerToRfidMap.set(chargerId, rfidCardId);
     this.sessionEnergyMap.set(chargerId, 0.0);
     this.trackSessionStart(chargerId, connectorId);
+
+    if (this.prisma.isReady()) {
+      const user = await findUserByRfidTag(this.prisma, rfidCardId);
+      if (user) {
+        this.operatorRfid.registerSessionContext(chargerId, user.id, rfidCardId, connectorId);
+      }
+    }
 
     this.wsGateway.emitChargerStatus(chargerId, WebSocketEvents.CHARGER_PREPARING, {
       chargerId,

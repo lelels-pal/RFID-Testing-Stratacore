@@ -180,12 +180,24 @@ These files are gitignored — create them locally.
 
 ### `apps\backend\.env`
 
+**MySQL mode (shared EdgeTechEV database):**
+
 ```env
-PORT=4001
+DB_TYPE=mysql
+DB_HOST=localhost
+DB_PORT=3305
+DB_USER=ev3_user
+DB_PASSWORD=admin123
+DB_NAME=ev_charger_backend
+USE_SQLITE=false
+
+JWT_SECRET_KEY=change-me-use-a-long-random-string
+OPERATOR_BASE_BALANCE=200
+OPERATOR_MIN_BALANCE_KWH=5
+BACKEND_PORT=4001
 OCPP_WS_PORT=9000
 OCPP_WS_PATH=/ocpp
 PRICE_PER_KWH=15
-JWT_SECRET=change-me-use-a-long-random-string
 PAYNAMICS_WEBHOOK_SECRET=change-me-use-a-long-random-string
 PAYNAMICS_CHECKOUT_URL=https://www.paynamics.net/webpaymentservice/checkout
 GUEST_APP_URL=https://guest.stratacore.tech
@@ -200,22 +212,49 @@ WATCHDOG_AUTOSTART=0
 HEALTH_MONITOR_AUTOSTART=1
 ```
 
+When `DB_HOST` is set and MySQL connects, Stratacore uses **users** (roles: master/admin/staff), **chargers**, **sessions**, and **operator_energy_requests** from the existing EdgeTechEV database. Admin and operator logins use the same accounts as EdgeTechEV.
+
+After configuring `.env`:
+
+```powershell
+cd apps\backend
+npm run prisma:generate
+```
+
+**File-only fallback** — omit `DB_HOST` or set `USE_SQLITE=true`; uses `rfids.json` and `admin-users.json` (default admin **`master`** / **`master123`**).
+
 ### `apps\kiosk\.env.local`
 
 ```env
 NEXT_PUBLIC_BACKEND_URL=https://api.stratacore.tech
-NEXT_PUBLIC_KIOSK_USERNAME=admin
-NEXT_PUBLIC_KIOSK_PASSWORD=change-me
 NEXT_PUBLIC_STATION_NAME=Charging Station
 NEXT_PUBLIC_STATION_LOCATION=
 NEXT_PUBLIC_CHARGERS=[{"chargerId":"DELTA123","connectorId":1,"chargerIp":"192.168.137.51"}]
 ```
 
+Admin login: open https://admin.stratacore.tech/login — default account **`master`** / **`master123`** (or set `ADMIN_DEFAULT_PASSWORD` in backend `.env` on first run). Roles: `master`, `admin` (full sidebar), `staff` (limited tabs).
+
 ### `apps\guest-app\.env.local`
 
 ```env
 NEXT_PUBLIC_BACKEND_URL=https://api.stratacore.tech
+NEXT_PUBLIC_CHARGERS=[{"chargerId":"DELTA123","connectorId":1}]
 ```
+
+**Operator mobile:** https://guest.stratacore.tech/auth/login — use RFID or username + PIN from the kiosk **Operators** tab.
+
+**Guest QR flow:** https://guest.stratacore.tech/guest?token=... (unchanged).
+
+### Roles, operators, and RFID balance
+
+| Concept | Stratacore field | Notes |
+|---------|------------------|-------|
+| Base monthly allowance | `monthlyKwhLimit` on RFID card | Set in **Top-Up** tab or when creating an operator |
+| Remaining balance | `monthlyKwhLimit - currentMonthKwhConsumed` | Shown as `balance` in operator mobile app |
+| Admin users | `apps/backend/admin-users.json` | First run creates `master` (password from `ADMIN_DEFAULT_PASSWORD` or `master123`) |
+| Operators | `apps/backend/rfids.json` | Each card can have `username`, `pinHash`, and `role` (`operator` / `staff`) |
+
+Sample operator (seeded in `rfids.json`): RFID **`0429DD0AD86380`**, username **`pingpong`**, PIN **`1234`**, 200 kWh/month.
 
 > **Important:** `NEXT_PUBLIC_*` values are baked in at build time. After changing them, run `npm run build` and restart the kiosk and guest app.
 

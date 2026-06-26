@@ -4,12 +4,15 @@ import { AuthService } from '../auth/auth.service';
 import { RfidService } from './rfid.service';
 import { CreateCheckoutRequest, CreateRfidRequest, UpdateRfidRequest, RfidStartRequest } from '@packages/shared';
 
+import { ChargersDbService } from '../chargers/chargers-db.service';
+
 @Controller('api/v1/charging')
 export class ChargingController {
   constructor(
     private readonly chargingService: ChargingService,
     private readonly authService: AuthService,
-    private readonly rfidService: RfidService
+    private readonly rfidService: RfidService,
+    private readonly chargersDb: ChargersDbService,
   ) {}
 
   @Get('rfid')
@@ -27,6 +30,11 @@ export class ChargingController {
     return this.chargingService.getOcppTrace(safeLimit, rfidOnly === 'true');
   }
 
+  @Get('chargers/registry')
+  async listChargersFromDb() {
+    return this.chargersDb.listAll();
+  }
+
   @Get('chargers')
   async listChargers(@Query('ids') ids?: string) {
     const chargerIds = ids
@@ -40,8 +48,8 @@ export class ChargingController {
 
   @Post('rfid')
   async registerRfid(@Body() body: CreateRfidRequest) {
-    if (!body.rfidCardId || !body.cardholderName || body.monthlyKwhLimit === undefined) {
-      throw new BadRequestException('rfidCardId, cardholderName, and monthlyKwhLimit are required.');
+    if (!body.rfidCardId || !body.cardholderName) {
+      throw new BadRequestException('rfidCardId and cardholderName are required.');
     }
     return this.rfidService.register(body);
   }

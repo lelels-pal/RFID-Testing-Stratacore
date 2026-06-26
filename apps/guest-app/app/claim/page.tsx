@@ -8,5 +8,5 @@ interface ClaimPageProps {
 
 export default function ClaimPage({ searchParams }: ClaimPageProps) {
   const token = searchParams?.token;
-  redirect(token ? `/?token=${encodeURIComponent(token)}` : '/');
+  redirect(token ? `/guest?token=${encodeURIComponent(token)}` : '/');
 }

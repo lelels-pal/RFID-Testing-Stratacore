@@ -1,0 +1,7 @@
+[
+  {
+    "username": "master",
+    "passwordHash": "scrypt:a20a7e77cd26209774b484f8f878fbac:18a3154fccf8ebc7b9aeabd92cd9d08e00edac9c708cc96f71f0ca5006ff876fcfc176f4f8db15b0cba35a2b3ac0101584745a971b293176e128daceed90f70a",
+    "role": "master"
+  }
+]

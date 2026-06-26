@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #120b08 0%, #1f1b18 48%, #050505 100%);
+  color: #f8f1eb;
+}
+
+.cms-shell {
+  background: linear-gradient(135deg, #120b08 0%, #1f1b18 48%, #050505 100%);
+}
+
+.cms-sidebar {
+  background: rgba(12, 10, 9, 0.95);
+  border-color: rgba(120, 113, 108, 0.25);
+}
+
+.cms-sidebar-header,
+.cms-sidebar-footer {
+  border-color: rgba(120, 113, 108, 0.25);
+}
+
+.cms-main {
+  background: transparent;
+}
+
+.cms-nav-item-inactive:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cms-profile-menu {
+  background: #1c1917;
+  border-color: rgba(120, 113, 108, 0.35);
+}
+
+.cms-profile-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}

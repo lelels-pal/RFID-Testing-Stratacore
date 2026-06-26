@@ -5,6 +5,9 @@
     "monthlyKwhLimit": 200,
     "currentMonthKwhConsumed": 0,
     "lastResetDate": "2026-06-23T07:08:38.801Z",
-    "isActive": true
+    "isActive": true,
+    "username": "pingpong",
+    "role": "operator",
+    "pinHash": "scrypt:89833c712e10e3a3a2b417b4f83dd4f9:561ffbcd7e97917cb9c5fc4d1427dff7c35f6decb312bc90905c1f26c65a4fa84fe90ca49e3fb819a5f79b178218f4d9713866d399d25553dd35328d8adf9284"
   }
 ]
