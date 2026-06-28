@@ -2,17 +2,19 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload, OcppTraceEntry, getApiBaseUrl } from '@packages/shared';
+import { RfidCard, WsMeterUpdatePayload, ChargerConnectionInfo, WsRfidAuthDeniedPayload, OcppTraceEntry, EnergyRequest, getApiBaseUrl } from '@packages/shared';
 import { useAuth } from '../context/AuthContext';
 import { useKioskData } from '../hooks/useKioskData';
-import { useChargerQr } from '../hooks/useChargerQr';
 import { QrPanel } from '../components/QrPanel';
+import { getGuestPortalLoginUrl } from '../lib/guest-portal';
 import {
   registerRfid as apiRegisterRfid,
   updateRfid as apiUpdateRfid,
   deleteRfid as apiDeleteRfid,
   startRfidSession as apiStartRfidSession,
   kioskStopCharger,
+  fetchEnergyRequests,
+  reviewEnergyRequest,
 } from '../lib/api-client';
 
 const WsEvents = {
@@ -29,7 +31,9 @@ const WsEvents = {
   SUBSCRIBE_CHARGER: 'subscribe:charger',
 };
 
-type ViewTab = 'dashboard' | 'chargepoints' | 'topup';
+type ViewTab = 'dashboard' | 'chargepoints' | 'topup' | 'requests';
+
+const RFID_STOP_BUFFER_KWH = Number(process.env.NEXT_PUBLIC_RFID_STOP_BUFFER_KWH) || 5;
 
 interface ChargerDefinition {
   chargerId: string;
@@ -66,7 +70,8 @@ function formatResetLabel(): string {
 }
 
 function isCardExhausted(card: RfidCard): boolean {
-  return card.currentMonthKwhConsumed >= card.monthlyKwhLimit;
+  const remaining = Math.max(0, card.monthlyKwhLimit - card.currentMonthKwhConsumed);
+  return remaining <= RFID_STOP_BUFFER_KWH;
 }
 
 function getSessionDotColor(status: LocalSessionState['status'], isOnline = true): string {
@@ -144,7 +149,7 @@ export default function AdminDashboardPage() {
   const [loginError, setLoginError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const [backendHealthy, setBackendHealthy] = useState(false);
+  const [, setBackendHealthy] = useState(false);
 
   // Layout & Routing State
   const [currentTab, setCurrentTab] = useState<ViewTab>('dashboard');
@@ -168,19 +173,15 @@ export default function AdminDashboardPage() {
     fetchOcppTrace,
   } = useKioskData(backendUrl, isLoggedIn);
 
-  const { qrSessions, refreshSession } = useChargerQr(
-    backendUrl,
-    CHARGER_CONFIGS,
-    isLoggedIn,
-    backendHealthy,
-  );
-
   const [sessions, setSessions] = useState<Record<string, LocalSessionState>>({});
 
   // RFID Allocation/Form State
   const [newCardId, setNewCardId] = useState('');
   const [newCardholder, setNewCardholder] = useState('');
   const [newCardLimit, setNewCardLimit] = useState('200');
+  const [newCardPin, setNewCardPin] = useState('1234');
+  const [energyRequests, setEnergyRequests] = useState<EnergyRequest[]>([]);
+  const [guestPortalUrl] = useState(() => getGuestPortalLoginUrl());
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
 
@@ -358,7 +359,6 @@ export default function AdminDashboardPage() {
           },
         }));
         fetchRfids();
-        refreshSession(data.chargerId);
       }, 5000);
     });
 
@@ -383,7 +383,6 @@ export default function AdminDashboardPage() {
           },
         }));
         fetchRfids();
-        refreshSession(data.chargerId);
       }, 6000);
     });
 
@@ -403,7 +402,7 @@ export default function AdminDashboardPage() {
     return () => {
       socket.disconnect();
     };
-  }, [backendUrl, isLoggedIn, CHARGER_CONFIGS, fetchRfids, refreshSession, setChargerConnections, setOcppTrace]);
+  }, [backendUrl, isLoggedIn, CHARGER_CONFIGS, fetchRfids, setChargerConnections, setOcppTrace]);
 
   // Sign In Handler
   const handleSignIn = async (e: React.FormEvent) => {
@@ -486,6 +485,17 @@ export default function AdminDashboardPage() {
     }
   };
 
+
+  const handleReviewRequest = async (id: string, action: 'approve' | 'decline') => {
+    try {
+      await reviewEnergyRequest(backendUrl, id, action);
+      setEnergyRequests(await fetchEnergyRequests(backendUrl));
+      fetchRfids();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   // Add RFID Card Handler
   const handleRegisterRfid = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -502,12 +512,14 @@ export default function AdminDashboardPage() {
         rfidCardId: newCardId.trim().toUpperCase(),
         cardholderName: newCardholder.trim(),
         monthlyKwhLimit: parseFloat(newCardLimit),
+        pin: newCardPin.trim() || '1234',
       });
 
       setFormSuccess(`Card ${newCardId.toUpperCase()} successfully registered!`);
       setNewCardId('');
       setNewCardholder('');
       setNewCardLimit('200');
+      setNewCardPin('1234');
       fetchRfids();
     } catch (err) {
       setFormError((err as Error).message);
@@ -736,6 +748,7 @@ export default function AdminDashboardPage() {
             { id: 'dashboard', label: 'Dashboard', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z' },
             { id: 'chargepoints', label: 'Chargepoints', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
             { id: 'topup', label: 'Top-Up', icon: 'M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z' },
+            { id: 'requests', label: 'Requests', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
           ].map((item) => {
             const isActive = currentTab === item.id;
             return (
@@ -797,6 +810,7 @@ export default function AdminDashboardPage() {
               {currentTab === 'dashboard' && 'Dashboard'}
               {currentTab === 'chargepoints' && 'Charge Points'}
               {currentTab === 'topup' && 'RFID Top-Up Allocation'}
+              {currentTab === 'requests' && 'kWh Requests'}
             </h2>
           </div>
 
@@ -1331,8 +1345,8 @@ export default function AdminDashboardPage() {
                     {sessions[selectedChargerId]?.status === 'IDLE' && (
                       <div style={cpStyles.modalBody}>
                         <QrPanel
-                          qrUrl={qrSessions[selectedChargerId]?.qrUrl || ''}
-                          statusMessage={qrSessions[selectedChargerId]?.statusMessage || 'Generating QR…'}
+                          qrUrl={guestPortalUrl}
+                          statusMessage="Employee Customer App — permanent login QR"
                         />
                         {!chargerConnections[selectedChargerId]?.connected ? (
                           <p style={{ color: '#64748b', fontSize: 14, marginBottom: 20 }}>
@@ -1539,6 +1553,48 @@ export default function AdminDashboardPage() {
             </div>
           )}
 
+
+          {currentTab === 'requests' && (
+            <div style={dashStyles.viewContainer}>
+              <div style={dashStyles.panelCard}>
+                <h3 style={dashStyles.panelTitle}>PENDING kWh REQUESTS</h3>
+                <p style={{ color: '#64748b', fontSize: 13, marginBottom: 16 }}>
+                  Employees request extra kWh from the customer app. Approve to increase their monthly limit.
+                </p>
+                <QrPanel qrUrl={guestPortalUrl} statusMessage="Permanent customer app QR for employee login" size={140} />
+                {energyRequests.filter((r) => r.status === 'pending').length === 0 ? (
+                  <p style={{ color: '#64748b' }}>No pending requests.</p>
+                ) : (
+                  <table style={dashStyles.table}>
+                    <thead>
+                      <tr style={dashStyles.tableHeaderRow}>
+                        <th style={dashStyles.tableHeaderCell}>Employee</th>
+                        <th style={dashStyles.tableHeaderCell}>RFID</th>
+                        <th style={dashStyles.tableHeaderCell}>kWh</th>
+                        <th style={dashStyles.tableHeaderCell}>Requested</th>
+                        <th style={dashStyles.tableHeaderCell}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {energyRequests.filter((r) => r.status === 'pending').map((req) => (
+                        <tr key={req.id} style={dashStyles.tableBodyRow}>
+                          <td style={dashStyles.tableBodyCell}>{req.cardholderName}</td>
+                          <td style={dashStyles.tableBodyCell}><span style={dashStyles.rfidPill}>{req.rfidCardId}</span></td>
+                          <td style={dashStyles.tableBodyCell}>+{req.kwhAmount} kWh</td>
+                          <td style={dashStyles.tableBodyCell}>{new Date(req.createdAt).toLocaleString()}</td>
+                          <td style={dashStyles.tableBodyCell}>
+                            <button onClick={() => handleReviewRequest(req.id, 'approve')} style={{ ...dashStyles.btnSubmit, padding: '6px 12px', marginRight: 8 }}>Approve</button>
+                            <button onClick={() => handleReviewRequest(req.id, 'decline')} style={{ ...dashStyles.badgeButton, padding: '6px 12px' }}>Decline</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ───────────────────────────────────────────────────────
               TAB 3: TOP-UP RFID REGISTRY VIEW (RFID MANAGEMENT)
               ─────────────────────────────────────────────────────── */}
@@ -1573,6 +1629,17 @@ export default function AdminDashboardPage() {
                           placeholder="e.g. John Smith"
                           value={newCardholder}
                           onChange={(e) => setNewCardholder(e.target.value)}
+                          style={dashStyles.input}
+                        />
+                      </div>
+
+                      <div style={dashStyles.formGroup}>
+                        <label style={dashStyles.label}>Initial PIN</label>
+                        <input
+                          type="password"
+                          placeholder="Default: 1234"
+                          value={newCardPin}
+                          onChange={(e) => setNewCardPin(e.target.value)}
                           style={dashStyles.input}
                         />
                       </div>
@@ -1620,7 +1687,7 @@ export default function AdminDashboardPage() {
                         <tbody>
                           {rfidCards.map((card) => {
                             const pct = Math.min((card.currentMonthKwhConsumed / card.monthlyKwhLimit) * 100, 100);
-                            const isExhausted = card.currentMonthKwhConsumed >= card.monthlyKwhLimit;
+                            const isExhausted = isCardExhausted(card);
 
                             return (
                               <tr key={card.rfidCardId} style={dashStyles.tableBodyRow}>

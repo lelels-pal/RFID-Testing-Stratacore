@@ -7,9 +7,10 @@ interface QrPanelProps {
   qrUrl: string;
   statusMessage: string;
   size?: number;
+  hint?: string;
 }
 
-export function QrPanel({ qrUrl, statusMessage, size = 180 }: QrPanelProps) {
+export function QrPanel({ qrUrl, statusMessage, size = 180, hint }: QrPanelProps) {
   if (!qrUrl) {
     return (
       <div style={styles.placeholder}>
@@ -24,7 +25,7 @@ export function QrPanel({ qrUrl, statusMessage, size = 180 }: QrPanelProps) {
         <QRCodeSVG value={qrUrl} size={size} bgColor="#ffffff" fgColor="#000000" level="M" />
       </div>
       <p style={styles.message}>{statusMessage}</p>
-      <p style={styles.hint}>Guest scans with phone camera to start prepaid charging</p>
+      <p style={styles.hint}>{hint || 'Employees scan to open the customer app and sign in with RFID + PIN'}</p>
     </div>
   );
 }

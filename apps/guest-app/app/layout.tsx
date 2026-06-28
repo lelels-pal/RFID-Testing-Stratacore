@@ -1,29 +1,42 @@
-import React from 'react';
+import type { Metadata } from 'next';
 import './globals.css';
 
-export const metadata = {
-  title: 'Stratacore — EV Charging',
-  description: 'Scan, pay, and charge your EV at Stratacore stations',
+export const metadata: Metadata = {
+  title: 'Stratacore EV Charging',
+  description: 'Premium EV Charging with Complimentary WiFi',
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Stratacore',
+  },
+  other: {
+    'mobile-web-app-capable': 'yes',
+  },
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+    maximumScale: 1,
+    userScalable: false,
+    viewportFit: 'cover',
+  },
+  themeColor: '#0a0a0a',
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-        <meta name="theme-color" content="#0a0a0a" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-          rel="stylesheet"
-        />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
       </head>
-      <body>{children}</body>
+      <body
+        className="min-h-screen text-[#f8f1eb] antialiased"
+        style={{
+          background: 'linear-gradient(135deg, #120b08 0%, #1f1b18 48%, #050505 100%)',
+        }}
+      >
+        {children}
+      </body>
     </html>
   );
 }

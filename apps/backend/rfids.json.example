@@ -5,6 +5,9 @@
     "monthlyKwhLimit": 200,
     "currentMonthKwhConsumed": 0,
     "lastResetDate": "2026-01-01T00:00:00.000Z",
-    "isActive": true
+    "isActive": true,
+    "username": "example_user",
+    "role": "operator",
+    "pinHash": "scrypt:..."
   }
 ]

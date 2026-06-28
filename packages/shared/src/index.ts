@@ -85,6 +85,66 @@ export interface WsRfidAuthDeniedPayload {
   timestamp: string;
 }
 
+export interface WsSessionErrorPayload {
+  chargerId?: string;
+  connectorId?: number;
+  message: string;
+  reason?: 'quota_buffer' | 'quota_exhausted' | 'fault' | 'unknown';
+}
+
+// --- Operator / Employee Portal ---
+
+export type OperatorRole = 'operator' | 'staff' | 'employee';
+
+export interface OperatorLoginRequest {
+  identifier: string;
+  pin: string;
+}
+
+export interface OperatorProfile {
+  rfid_tag: string;
+  cardholderName: string;
+  username?: string;
+  role?: OperatorRole;
+  balance: number;
+  base_balance_kwh: number;
+  currentMonthKwhConsumed: number;
+  isActive: boolean;
+}
+
+export interface OperatorLoginResponse {
+  token: string;
+  user: OperatorProfile;
+}
+
+export interface ChangeOperatorPinRequest {
+  currentPin: string;
+  newPin: string;
+}
+
+// --- Energy Requests ---
+
+export type EnergyRequestStatus = 'pending' | 'accepted' | 'declined';
+
+export interface EnergyRequest {
+  id: string;
+  rfidCardId: string;
+  cardholderName: string;
+  kwhAmount: number;
+  status: EnergyRequestStatus;
+  adminNote?: string;
+  createdAt: string;
+  reviewedAt?: string;
+}
+
+export interface CreateEnergyRequestBody {
+  kwhAmount: number;
+}
+
+export interface ReviewEnergyRequestBody {
+  adminNote?: string;
+}
+
 export interface WsMeterUpdatePayload {
   chargerId: string;
   connectorId: number;
@@ -141,12 +201,17 @@ export interface RfidCard {
   currentMonthKwhConsumed: number;
   lastResetDate: string;
   isActive: boolean;
+  username?: string;
+  role?: OperatorRole;
 }
 
 export interface CreateRfidRequest {
   rfidCardId: string;
   cardholderName: string;
   monthlyKwhLimit: number;
+  username?: string;
+  role?: OperatorRole;
+  pin?: string;
 }
 
 export interface UpdateRfidRequest {
@@ -154,6 +219,9 @@ export interface UpdateRfidRequest {
   monthlyKwhLimit?: number;
   isActive?: boolean;
   currentMonthKwhConsumed?: number;
+  username?: string;
+  role?: OperatorRole;
+  pin?: string;
 }
 
 export interface RfidStartRequest {

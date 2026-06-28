@@ -7,6 +7,7 @@ import { PaymentsService } from '../payments/payments.service';
 import { ChargersConfigService } from '../chargers/chargers-config.service';
 import { AdminAuthGuard } from '../admin-auth/admin-auth.guard';
 import { CreateCheckoutRequest, CreateRfidRequest, UpdateRfidRequest, RfidStartRequest } from '@packages/shared';
+import { isRfidQuotaBlocked, rfidQuotaBlockedMessage } from '../../utils/rfid-quota.util';
 
 @Controller('api/v1/charging')
 export class ChargingController {
@@ -87,8 +88,8 @@ export class ChargingController {
     if (!card.isActive) {
       throw new BadRequestException('RFID Card is deactivated.');
     }
-    if (card.currentMonthKwhConsumed >= card.monthlyKwhLimit) {
-      throw new BadRequestException(`Card quota exhausted (${card.currentMonthKwhConsumed.toFixed(2)} / ${card.monthlyKwhLimit} kWh).`);
+    if (isRfidQuotaBlocked(card)) {
+      throw new BadRequestException(rfidQuotaBlockedMessage(card));
     }
 
     return this.chargingService.startRfidSession(

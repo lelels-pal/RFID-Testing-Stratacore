@@ -1,439 +1,89 @@
 'use client';
 
-import React, { useEffect, useState, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
-import { io, Socket } from 'socket.io-client';
-import { getApiBaseUrl } from '@packages/shared';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Zap } from 'lucide-react';
+import { getToken } from '@/lib/auth';
+import { buildLoginUrl, buildPortalReturnUrl } from '@/lib/portal-query';
 
-const WsEvents = {
-  SESSION_CLAIMED:   'session:claimed',
-  PAYMENT_APPROVED:  'payment:approved',
-  CHARGER_PREPARING: 'charger:preparing',
-  CHARGER_STARTING:  'charger:starting',
-  METER_UPDATE:      'charger:meter_update',
-  SESSION_COMPLETED: 'session:completed',
-  SESSION_ERROR:     'session:error',
-  SUBSCRIBE_CHARGER: 'subscribe:charger',
-};
-
-interface MeterUpdate {
-  chargerId: string;
-  connectorId: number;
-  sessionId: string;
-  timestamp: string;
-  powerKw: number;
-  energyDeliveredKwh: number;
-  durationSeconds: number;
-  currentAmps: number;
-  voltageVolts: number;
-  estimatedCost: number;
-}
-
-type Step = 'HANDSHAKE' | 'SELECT_PLAN' | 'CHARGING' | 'COMPLETED' | 'ERROR';
-
-const STEP_ORDER: Step[] = ['HANDSHAKE', 'SELECT_PLAN', 'CHARGING', 'COMPLETED'];
-
-function getBackendUrl() {
-  return getApiBaseUrl({
-    envUrl: process.env.NEXT_PUBLIC_BACKEND_URL,
-    origin:
-      typeof window !== 'undefined'
-        ? { protocol: window.location.protocol, hostname: window.location.hostname }
-        : undefined,
-  });
-}
-
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}m ${s}s`;
-}
-
-function StepIndicator({ current }: { current: Step }) {
-  if (current === 'ERROR') return null;
-
-  const currentIdx = STEP_ORDER.indexOf(current);
-
-  return (
-    <div className="step-track" aria-label="Charging progress">
-      {STEP_ORDER.map((step, i) => (
-        <React.Fragment key={step}>
-          <div
-            className={`step-dot ${i < currentIdx ? 'done' : ''} ${i === currentIdx ? 'active' : ''}`}
-            aria-current={i === currentIdx ? 'step' : undefined}
-          >
-            {i < currentIdx ? '✓' : i + 1}
-          </div>
-          {i < STEP_ORDER.length - 1 && (
-            <div className={`step-line ${i < currentIdx ? 'done' : ''}`} />
-          )}
-        </React.Fragment>
-      ))}
-    </div>
-  );
-}
-
-function EnergyGauge({ kwh, maxKwh = 30 }: { kwh: number; maxKwh?: number }) {
-  const pct = Math.min(kwh / maxKwh, 1);
-  const circumference = 2 * Math.PI * 45;
-  const offset = circumference * (1 - pct);
-
-  return (
-    <div className="gauge-wrap">
-      <svg className="gauge-ring" width="160" height="160" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="45" fill="none" stroke="#2a2a2a" strokeWidth="6" />
-        <circle
-          cx="50"
-          cy="50"
-          r="45"
-          fill="none"
-          stroke="#e2790d"
-          strokeWidth="6"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={offset}
-          style={{ transition: 'stroke-dashoffset 0.6s ease' }}
-        />
-      </svg>
-      <div className="gauge-center">
-        <div className="gauge-value">{kwh.toFixed(2)}</div>
-        <div className="gauge-unit">kWh delivered</div>
-      </div>
-    </div>
-  );
-}
-
-function GuestAppContent() {
+export default function SplashPage() {
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const tokenFromUrl = searchParams.get('token') || '';
-  const backendUrl = getBackendUrl();
+  const [fadeOut, setFadeOut] = useState(false);
 
-  const [step, setStep] = useState<Step>('HANDSHAKE');
-  const [chargerId, setChargerId] = useState('');
-  const [connectorId, setConnectorId] = useState(0);
-  const [accessToken, setAccessToken] = useState('');
-  const [statusMessage, setStatusMessage] = useState('Scan detected — ready to connect');
-  const [telemetry, setTelemetry] = useState<MeterUpdate | null>(null);
-  const [isClaiming, setIsClaiming] = useState(false);
-  const [isCheckingOut, setIsCheckingOut] = useState(false);
-  const [isStopping, setIsStopping] = useState(false);
-  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
-
-  const getFingerprint = () => {
-    if (typeof window === 'undefined') return 'server';
-    return `${navigator.userAgent}-${window.screen.width}x${window.screen.height}`;
-  };
+  const loginPath = buildLoginUrl(searchParams);
 
   useEffect(() => {
-    if (tokenFromUrl) {
-      setStatusMessage('Your charger link is valid. Tap below to get started.');
-    } else {
-      setStep('ERROR');
-      setStatusMessage('No charger link found. Please scan the QR code on the kiosk screen.');
+    if (getToken()) {
+      router.replace(buildPortalReturnUrl(searchParams));
+      return;
     }
-  }, [tokenFromUrl]);
 
-  const claimCharger = async () => {
-    try {
-      setIsClaiming(true);
-      setStatusMessage('Connecting to charger…');
-      const response = await fetch(`${backendUrl}/api/v1/session/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-device-fingerprint': getFingerprint() },
-        body: JSON.stringify({ qrToken: tokenFromUrl }),
-      });
+    const fadeTimer = setTimeout(() => setFadeOut(true), 2200);
+    const navTimer = setTimeout(() => router.replace(loginPath), 2800);
 
-      if (!response.ok) throw new Error('This link may have expired. Please scan the QR code again.');
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(navTimer);
+    };
+  }, [router, loginPath, searchParams]);
 
-      const data = await response.json();
-      setAccessToken(data.accessToken);
-      setChargerId(data.chargerId);
-      setConnectorId(data.connectorId);
-
-      const s: Socket = io(backendUrl);
-      s.on('connect', () => { s.emit(WsEvents.SUBSCRIBE_CHARGER, { chargerId: data.chargerId }); });
-      s.on(WsEvents.PAYMENT_APPROVED, () => {
-        setStep('CHARGING');
-        setStatusMessage('Payment confirmed — starting your session');
-      });
-      s.on(WsEvents.CHARGER_PREPARING, (msg: { message: string }) => {
-        setStep('CHARGING');
-        setStatusMessage(msg.message || 'Plug in your vehicle to begin');
-      });
-      s.on(WsEvents.CHARGER_STARTING, () => {
-        setStep('CHARGING');
-        setStatusMessage('Charging in progress');
-      });
-      s.on(WsEvents.METER_UPDATE, (metrics: MeterUpdate) => { setTelemetry(metrics); });
-      s.on(WsEvents.SESSION_COMPLETED, () => {
-        setStep('COMPLETED');
-        setStatusMessage('Your session is complete');
-      });
-      s.on(WsEvents.SESSION_ERROR, (msg: { message?: string }) => {
-        setStep('ERROR');
-        setStatusMessage(msg?.message || 'The charger could not start. Please contact station staff.');
-      });
-
-      setStep('SELECT_PLAN');
-    } catch (err) {
-      setStep('ERROR');
-      setStatusMessage((err as Error).message || 'Could not connect to the charger.');
-    } finally {
-      setIsClaiming(false);
-    }
-  };
-
-  const checkoutPlan = async (tariffPlanId: string) => {
-    try {
-      setSelectedPlan(tariffPlanId);
-      setIsCheckingOut(true);
-      setStatusMessage('Setting up secure checkout…');
-      const response = await fetch(`${backendUrl}/api/v1/charging/checkout`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-          'x-device-fingerprint': getFingerprint(),
-          'x-guest-app-origin': typeof window !== 'undefined' ? window.location.origin : '',
-        },
-        body: JSON.stringify({ chargerId, connectorId, tariffPlanId }),
-      });
-      if (!response.ok) throw new Error('Checkout failed');
-      const data = await response.json();
-      if (!data.redirectUrl) throw new Error('Maya redirect URL missing.');
-
-      sessionStorage.setItem('guest_access_token', accessToken);
-      sessionStorage.setItem('guest_charger_id', chargerId);
-      sessionStorage.setItem('guest_connector_id', String(connectorId));
-      if (data.requestReferenceNumber) {
-        sessionStorage.setItem('guest_payment_ref', data.requestReferenceNumber);
-      }
-      if (data.checkoutId) {
-        sessionStorage.setItem('guest_checkout_id', data.checkoutId);
-      }
-
-      window.location.href = data.redirectUrl;
-    } catch {
-      setStep('ERROR');
-      setStatusMessage('Could not start checkout. Please try again.');
-    } finally {
-      setIsCheckingOut(false);
-    }
-  };
-
-  const stopCharging = async () => {
-    try {
-      setIsStopping(true);
-      setStatusMessage('Stopping session…');
-      const response = await fetch(`${backendUrl}/api/v1/charging/stop`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-          'x-device-fingerprint': getFingerprint(),
-        },
-        body: JSON.stringify({ transactionId: telemetry ? Number(telemetry.sessionId) || undefined : undefined }),
-      });
-      if (!response.ok) throw new Error('Stop request was rejected.');
-    } catch (err) {
-      setStatusMessage((err as Error).message || 'Could not stop charging.');
-    } finally {
-      setIsStopping(false);
-    }
+  const goToLogin = () => {
+    setFadeOut(true);
+    setTimeout(() => router.replace(loginPath), 300);
   };
 
   return (
-    <div className="guest-app">
-      <header className="guest-header">
-        <div className="guest-logo">
-          STRATACORE <span className="guest-logo-sub">CHARGE</span>
-        </div>
-      </header>
-
-      <main className="guest-main">
-        <StepIndicator current={step} />
-
-        {step === 'HANDSHAKE' && (
-          <div className="card">
-            <div className="card-icon">⚡</div>
-            <h1 className="card-title">Ready to Charge</h1>
-            <p className="card-subtitle">{statusMessage}</p>
-            {tokenFromUrl && (
-              <button
-                className="btn btn-primary"
-                onClick={claimCharger}
-                disabled={isClaiming}
-              >
-                {isClaiming ? (
-                  <>
-                    <span className="spinner" aria-hidden />
-                    Connecting…
-                  </>
-                ) : (
-                  'Connect to Charger'
-                )}
-              </button>
-            )}
-          </div>
-        )}
-
-        {step === 'SELECT_PLAN' && (
-          <div className="card">
-            <h1 className="card-title">Choose Your Plan</h1>
-            <div className="charger-badge">
-              Charger <strong>{chargerId}</strong> · Connector #{connectorId}
-            </div>
-            <p className="card-subtitle" style={{ marginBottom: 16 }}>
-              Select a prepaid package. Charging starts automatically after payment.
-            </p>
-
-            <div className="plans">
-              <button
-                className={`plan-card recommended ${isCheckingOut && selectedPlan === 'PREPAID_15KWH' ? 'loading' : ''}`}
-                onClick={() => checkoutPlan('PREPAID_15KWH')}
-                disabled={isCheckingOut}
-              >
-                <span className="plan-badge">POPULAR</span>
-                <div className="plan-title">Quick Charge</div>
-                <div className="plan-price">₱225.00</div>
-                <div className="plan-meta">15 kWh · ~100 km range · AC Standard</div>
-              </button>
-              <button
-                className="plan-card"
-                onClick={() => checkoutPlan('PREPAID_30KWH')}
-                disabled={isCheckingOut}
-              >
-                <div className="plan-title">Full Charge</div>
-                <div className="plan-price">₱450.00</div>
-                <div className="plan-meta">30 kWh · ~200 km range · AC Extended</div>
-              </button>
-            </div>
-
-            {isCheckingOut && (
-              <p className="card-subtitle" style={{ marginTop: 16, marginBottom: 0 }}>
-                <span className="spinner spinner-light" style={{ display: 'inline-block', verticalAlign: 'middle', marginRight: 8 }} />
-                Preparing checkout…
-              </p>
-            )}
-          </div>
-        )}
-
-        {step === 'CHARGING' && (
-          <div className="card">
-            <div className="status-banner">
-              <span className="status-dot" />
-              {statusMessage}
-            </div>
-
-            {telemetry ? (
-              <>
-                <EnergyGauge kwh={telemetry.energyDeliveredKwh} maxKwh={30} />
-                <div className="stats-grid">
-                  <div className="stat-card">
-                    <div className="stat-label">Estimated cost</div>
-                    <div className="stat-value">₱{telemetry.estimatedCost.toFixed(2)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Duration</div>
-                    <div className="stat-value">{formatDuration(telemetry.durationSeconds)}</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Power</div>
-                    <div className="stat-value">{telemetry.powerKw} kW</div>
-                  </div>
-                  <div className="stat-card">
-                    <div className="stat-label">Voltage / Amps</div>
-                    <div className="stat-value">{telemetry.voltageVolts}V · {telemetry.currentAmps}A</div>
-                  </div>
-                </div>
-
-                <button
-                  className="btn btn-danger"
-                  onClick={stopCharging}
-                  disabled={isStopping}
-                >
-                  {isStopping ? (
-                    <>
-                      <span className="spinner spinner-light" aria-hidden />
-                      Stopping…
-                    </>
-                  ) : (
-                    'Stop Charging'
-                  )}
-                </button>
-              </>
-            ) : (
-              <div className="waiting-block">
-                <div className="waiting-dots">
-                  <span /><span /><span />
-                </div>
-                <p>Waiting for charger to respond…</p>
-                <p style={{ fontSize: 12, marginTop: 8 }}>Make sure your vehicle is plugged in.</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {step === 'COMPLETED' && (
-          <div className="card">
-            <div className="card-icon success">✓</div>
-            <h1 className="card-title">All Done!</h1>
-            <p className="card-subtitle">
-              Payment processed successfully. You can safely unplug your vehicle.
-            </p>
-            {telemetry && (
-              <div className="stats-grid" style={{ marginBottom: 8 }}>
-                <div className="stat-card">
-                  <div className="stat-label">Energy delivered</div>
-                  <div className="stat-value">{telemetry.energyDeliveredKwh.toFixed(2)} kWh</div>
-                </div>
-                <div className="stat-card">
-                  <div className="stat-label">Total cost</div>
-                  <div className="stat-value">₱{telemetry.estimatedCost.toFixed(2)}</div>
-                </div>
-              </div>
-            )}
-            <p className="card-subtitle" style={{ marginBottom: 0, fontSize: 12 }}>
-              A receipt has been recorded for your session.
-            </p>
-          </div>
-        )}
-
-        {step === 'ERROR' && (
-          <div className="card error">
-            <div className="card-icon error">!</div>
-            <h1 className="card-title danger">Something Went Wrong</h1>
-            <p className="card-subtitle">{statusMessage}</p>
-            <button className="btn btn-primary" onClick={() => window.location.reload()}>
-              Try Again
-            </button>
-            {!tokenFromUrl && (
-              <p className="card-subtitle" style={{ marginTop: 16, marginBottom: 0, fontSize: 12 }}>
-                Open the camera on your phone and scan the QR code displayed on the kiosk.
-              </p>
-            )}
-          </div>
-        )}
-
-        <p className="footer-hint">
-          Stratacore EV Charging · Secure prepaid sessions
-        </p>
-      </main>
-    </div>
-  );
-}
-
-export default function GuestAppPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="loading-screen">
-          <span className="spinner" aria-hidden />
-          Loading…
-        </div>
-      }
+    <div
+      className={`min-h-dvh flex flex-col items-center justify-center px-6 transition-opacity duration-500 ${
+        fadeOut ? 'opacity-0' : 'opacity-100'
+      }`}
+      style={{
+        background:
+          'radial-gradient(ellipse 90% 60% at 50% 0%, rgba(249,115,22,0.35) 0%, transparent 55%), linear-gradient(180deg, #0c0a09 0%, #141210 45%, #0a0908 100%)',
+      }}
+      onClick={goToLogin}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') goToLogin();
+      }}
+      aria-label="Continue to sign in"
     >
-      <GuestAppContent />
-    </Suspense>
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-72 h-72 bg-orange-500/20 rounded-full blur-3xl" />
+        <div className="absolute bottom-1/4 right-1/4 w-48 h-48 bg-red-600/10 rounded-full blur-3xl" />
+      </div>
+
+      <div className="relative text-center space-y-8 max-w-sm">
+        <div className="relative mx-auto w-28 h-28">
+          <div className="absolute inset-0 bg-orange-500/30 rounded-[2rem] blur-xl animate-pulse" />
+          <div className="relative w-28 h-28 rounded-[2rem] bg-gradient-to-br from-orange-500 via-orange-500 to-red-600 flex items-center justify-center shadow-2xl shadow-orange-900/50 border border-white/10">
+            <Zap className="w-14 h-14 text-white" strokeWidth={1.75} />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-orange-300 via-orange-400 to-red-400 bg-clip-text text-transparent">
+            STRATACORE
+          </h1>
+          <p className="text-stone-400 text-lg font-medium">EV Charging Platform</p>
+          <p className="text-stone-500 text-sm">Operator mobile access</p>
+        </div>
+
+        <div className="pt-4 space-y-3">
+          <div className="flex justify-center gap-1.5">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="w-2 h-2 rounded-full bg-orange-400/80 animate-bounce"
+                style={{ animationDelay: `${i * 150}ms` }}
+              />
+            ))}
+          </div>
+          <p className="text-stone-600 text-xs">Tap anywhere to continue</p>
+        </div>
+      </div>
+    </div>
   );
 }

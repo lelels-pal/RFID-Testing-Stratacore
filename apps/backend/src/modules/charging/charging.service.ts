@@ -8,6 +8,7 @@ import { StaleSessionWatchdogService, TrackedSession } from '../watchdog/stale-s
 import { OcppTraceService } from './ocpp-trace.service';
 import { WatchdogEventLogService } from '../watchdog/watchdog-event-log.service';
 import { WebSocketEvents, OcppRemoteStartResult, OcppRemoteStopResult, ChargerStatus, ChargerConnectionInfo, OcppTraceEntry } from '@packages/shared';
+import { getRfidRemainingKwh, isRfidQuotaBlocked, rfidQuotaBlockedMessage } from '../../utils/rfid-quota.util';
 
 @Injectable()
 export class ChargingService implements OnModuleInit {
@@ -234,15 +235,16 @@ export class ChargingService implements OnModuleInit {
         `Monthly: ${card.currentMonthKwhConsumed.toFixed(4)} / ${card.monthlyKwhLimit} kWh`
       );
 
-      if (card.currentMonthKwhConsumed >= card.monthlyKwhLimit) {
+      if (isRfidQuotaBlocked(card)) {
         this.logger.warn(
-          `RFID Card ${rfidCardId} exceeded monthly limit of ${card.monthlyKwhLimit} kWh. Auto-stopping charger ${telemetry.chargerId}.`
+          `RFID Card ${rfidCardId} hit quota buffer (${getRfidRemainingKwh(card).toFixed(4)} kWh remaining). Auto-stopping charger ${telemetry.chargerId}.`
         );
         await this.triggerRemoteStop(telemetry.chargerId);
         this.wsGateway.emitChargerStatus(telemetry.chargerId, WebSocketEvents.SESSION_ERROR, {
           chargerId: telemetry.chargerId,
           connectorId: telemetry.connectorId,
-          message: `Session stopped automatically: Monthly limit of ${card.monthlyKwhLimit} kWh has been reached.`,
+          message: rfidQuotaBlockedMessage(card),
+          reason: 'quota_buffer',
         });
       }
     } catch (err) {

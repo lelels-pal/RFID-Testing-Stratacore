@@ -1,3 +1,5 @@
+import { EnergyRequest } from '@packages/shared';
+
 const ADMIN_TOKEN_KEY = 'kiosk_admin_token';
 
 let adminToken: string | null = null;
@@ -123,9 +125,28 @@ export async function kioskStopCharger(backendUrl: string, chargerId: string) {
   return parseJson(res);
 }
 
+export async function fetchEnergyRequests(backendUrl: string): Promise<EnergyRequest[]> {
+  const res = await fetch(`${backendUrl}/api/v1/admin/energy-requests`, { headers: adminHeaders() });
+  return parseJson<EnergyRequest[]>(res);
+}
+
+export async function reviewEnergyRequest(
+  backendUrl: string,
+  id: string,
+  action: 'approve' | 'decline',
+  adminNote?: string,
+) {
+  const res = await fetch(`${backendUrl}/api/v1/admin/energy-requests/${id}/${action}`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ adminNote }),
+  });
+  return parseJson<EnergyRequest>(res);
+}
+
 export async function registerRfid(
   backendUrl: string,
-  body: { rfidCardId: string; cardholderName: string; monthlyKwhLimit: number },
+  body: { rfidCardId: string; cardholderName: string; monthlyKwhLimit: number; pin?: string },
 ) {
   const res = await fetch(`${backendUrl}/api/v1/charging/rfid`, {
     method: 'POST',

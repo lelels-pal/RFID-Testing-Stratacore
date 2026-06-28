@@ -15,14 +15,23 @@ import { WatchdogModule } from './modules/watchdog/watchdog.module';
 import { AdminAuthModule } from './modules/admin-auth/admin-auth.module';
 import { ChargersConfigService } from './modules/chargers/chargers-config.service';
 import { SteveOcppAdapter } from '@packages/ocpp-adapter';
+import { OperatorAuthModule } from './modules/operator-auth/operator-auth.module';
+import { EnergyRequestsModule } from './modules/energy-requests/energy-requests.module';
+import { OperatorAuthController } from './modules/operator-auth/operator-auth.controller';
+import { OperatorChargingController } from './modules/operator-auth/operator-charging.controller';
+import { RfidQuotaResetScheduler } from './modules/charging/rfid-quota-reset.scheduler';
+import { isRfidQuotaBlocked } from './utils/rfid-quota.util';
+import { RfidModule } from './modules/charging/rfid.module';
 
 @Module({
-  imports: [AdminAuthModule, WatchdogModule],
+  imports: [AdminAuthModule, WatchdogModule, OperatorAuthModule, EnergyRequestsModule, RfidModule],
   controllers: [
     AuthController,
     ChargingController,
     PaymentsController,
     HealthController,
+    OperatorAuthController,
+    OperatorChargingController,
   ],
   providers: [
     RedisService,
@@ -32,8 +41,8 @@ import { SteveOcppAdapter } from '@packages/ocpp-adapter';
     ChargingService,
     MayaPaymentService,
     PaymentsService,
-    RfidService,
     OcppTraceService,
+    RfidQuotaResetScheduler,
     {
       provide: 'IChargerController',
       inject: [RfidService, ChargersConfigService],
@@ -47,7 +56,7 @@ import { SteveOcppAdapter } from '@packages/ocpp-adapter';
             const card = await rfidService.getById(idTag);
             if (!card) return 'Invalid';
             if (!card.isActive) return 'Blocked';
-            if (card.currentMonthKwhConsumed >= card.monthlyKwhLimit) return 'Blocked';
+            if (isRfidQuotaBlocked(card)) return 'Blocked';
             return 'Accepted';
           },
         });
