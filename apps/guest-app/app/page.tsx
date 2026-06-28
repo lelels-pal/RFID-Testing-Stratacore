@@ -29,9 +29,9 @@ interface MeterUpdate {
   estimatedCost: number;
 }
 
-type Step = 'HANDSHAKE' | 'SELECT_PLAN' | 'PAYING' | 'CHARGING' | 'COMPLETED' | 'ERROR';
+type Step = 'HANDSHAKE' | 'SELECT_PLAN' | 'CHARGING' | 'COMPLETED' | 'ERROR';
 
-const STEP_ORDER: Step[] = ['HANDSHAKE', 'SELECT_PLAN', 'PAYING', 'CHARGING', 'COMPLETED'];
+const STEP_ORDER: Step[] = ['HANDSHAKE', 'SELECT_PLAN', 'CHARGING', 'COMPLETED'];
 
 function getBackendUrl() {
   return getApiBaseUrl({
@@ -112,8 +112,6 @@ function GuestAppContent() {
   const [chargerId, setChargerId] = useState('');
   const [connectorId, setConnectorId] = useState(0);
   const [accessToken, setAccessToken] = useState('');
-  const [checkoutId, setCheckoutId] = useState('');
-  const [redirectUrl, setRedirectUrl] = useState('');
   const [statusMessage, setStatusMessage] = useState('Scan detected — ready to connect');
   const [telemetry, setTelemetry] = useState<MeterUpdate | null>(null);
   const [isClaiming, setIsClaiming] = useState(false);
@@ -196,15 +194,25 @@ function GuestAppContent() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
           'x-device-fingerprint': getFingerprint(),
+          'x-guest-app-origin': typeof window !== 'undefined' ? window.location.origin : '',
         },
         body: JSON.stringify({ chargerId, connectorId, tariffPlanId }),
       });
       if (!response.ok) throw new Error('Checkout failed');
       const data = await response.json();
-      setCheckoutId(data.checkoutId);
-      setRedirectUrl(data.redirectUrl || '');
-      setStep('PAYING');
-      setStatusMessage('Complete payment to unlock charging');
+      if (!data.redirectUrl) throw new Error('Maya redirect URL missing.');
+
+      sessionStorage.setItem('guest_access_token', accessToken);
+      sessionStorage.setItem('guest_charger_id', chargerId);
+      sessionStorage.setItem('guest_connector_id', String(connectorId));
+      if (data.requestReferenceNumber) {
+        sessionStorage.setItem('guest_payment_ref', data.requestReferenceNumber);
+      }
+      if (data.checkoutId) {
+        sessionStorage.setItem('guest_checkout_id', data.checkoutId);
+      }
+
+      window.location.href = data.redirectUrl;
     } catch {
       setStep('ERROR');
       setStatusMessage('Could not start checkout. Please try again.');
@@ -307,40 +315,6 @@ function GuestAppContent() {
                 Preparing checkout…
               </p>
             )}
-          </div>
-        )}
-
-        {step === 'PAYING' && (
-          <div className="card">
-            <div className="card-icon">💳</div>
-            <h1 className="card-title">Complete Payment</h1>
-            <p className="card-subtitle">
-              You&apos;ll be redirected to our secure payment partner. Charging begins right after confirmation.
-            </p>
-
-            {checkoutId && (
-              <div className="payment-box">
-                <div className="payment-ref-label">Reference</div>
-                <div className="payment-ref">{checkoutId}</div>
-              </div>
-            )}
-
-            {redirectUrl ? (
-              <a href={redirectUrl} target="_blank" rel="noopener noreferrer" className="btn btn-success">
-                Continue to Payment →
-              </a>
-            ) : (
-              <div className="waiting-block">
-                <div className="waiting-dots">
-                  <span /><span /><span />
-                </div>
-                <p>Loading payment gateway…</p>
-              </div>
-            )}
-
-            <p className="card-subtitle" style={{ marginTop: 16, marginBottom: 0, fontSize: 12 }}>
-              Keep this page open — we&apos;ll update automatically when payment clears.
-            </p>
           </div>
         )}
 

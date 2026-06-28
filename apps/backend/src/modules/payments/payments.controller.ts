@@ -1,80 +1,71 @@
-import { Controller, Post, Body, Headers, BadRequestException, Logger } from '@nestjs/common';
-import { createHmac } from 'crypto';
-import { RedisService } from '../redis/redis.service';
-import { ChargingService } from '../charging/charging.service';
-import { ChargerGateway } from '../charging/charging.gateway';
-import { WebSocketEvents } from '@packages/shared';
+import {
+  Controller,
+  Post,
+  Body,
+  Headers,
+  Query,
+  BadRequestException,
+  UnauthorizedException,
+  ForbiddenException,
+  Logger,
+} from '@nestjs/common';
+import { PaymentsService } from './payments.service';
+import { AuthService } from '../auth/auth.service';
+import { MayaPaymentRecord } from './maya-payment.service';
 
 @Controller('api/v1/payments')
 export class PaymentsController {
   private readonly logger = new Logger(PaymentsController.name);
-  private readonly paynamicsWebhookSecret = process.env.PAYNAMICS_WEBHOOK_SECRET || 'paynamics_webhook_signing_secret_key';
+  private readonly webhookToken = process.env.MAYA_WEBHOOK_TOKEN || '';
 
   constructor(
-    private readonly redis: RedisService,
-    private readonly chargingService: ChargingService,
-    private readonly wsGateway: ChargerGateway
+    private readonly paymentsService: PaymentsService,
+    private readonly authService: AuthService,
   ) {}
 
-  @Post('paynamics-webhook')
-  async handlePaynamicsWebhook(
-    @Headers('x-paynamics-signature') signature: string,
-    @Body() payload: { id: string; status: string; metadata?: { chargerId?: string; connectorId?: number } }
+  @Post('verify')
+  async verifyPayment(
+    @Headers('authorization') authHeader: string,
+    @Headers('x-device-fingerprint') fingerprint: string,
+    @Body() body: { checkoutId?: string; requestReferenceNumber?: string },
   ) {
-    this.logger.log(`Received payment status notification from Paynamics. ID: ${payload.id}`);
-
-    // 1. Verify webhook signature (CRITICAL for production-grade security)
-    if (!signature) {
-      this.logger.warn('Webhook signature missing in headers.');
-      throw new BadRequestException('Webhook signature missing.');
+    if (!authHeader?.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authentication token missing.');
+    }
+    if (!fingerprint) {
+      throw new BadRequestException('Security headers (x-device-fingerprint) missing.');
+    }
+    if (!body.checkoutId && !body.requestReferenceNumber) {
+      throw new BadRequestException('checkoutId or requestReferenceNumber is required.');
     }
 
-    const calculatedSignature = createHmac('sha256', this.paynamicsWebhookSecret)
-      .update(JSON.stringify(payload))
-      .digest('hex');
+    const token = authHeader.split(' ')[1];
+    const session = this.authService.validateGuestToken(token, fingerprint);
 
-    // For production security verification (leaving signature check active or log fallback)
-    this.logger.log(`Verified signature: ${signature.slice(0, 10)}... matched.`);
+    return this.paymentsService.verifyAndFulfill({
+      checkoutId: body.checkoutId,
+      requestReferenceNumber: body.requestReferenceNumber,
+      expectedChargerId: session.chargerId,
+      expectedConnectorId: session.connectorId,
+    });
+  }
 
-    // 2. Validate session association using the payment ID (checkoutId)
-    const checkoutKey = `checkout:${payload.id}`;
-    const checkoutRaw = await this.redis.get(checkoutKey);
-    if (!checkoutRaw) {
-      this.logger.warn(`Checkout session expired or not found for ID: ${payload.id}`);
-      throw new BadRequestException('Checkout session not found.');
+  @Post('maya-webhook')
+  async handleMayaWebhook(
+    @Query('token') token: string,
+    @Body() payload: MayaPaymentRecord,
+  ) {
+    if (!this.webhookToken) {
+      throw new ForbiddenException('Maya webhooks are disabled. Set MAYA_WEBHOOK_TOKEN to enable.');
+    }
+    if (!token || token !== this.webhookToken) {
+      this.logger.warn('Maya webhook rejected: invalid or missing URL token.');
+      throw new ForbiddenException('Invalid webhook token.');
     }
 
-    const checkoutData = JSON.parse(checkoutRaw);
-
-    // 3. Process payment status
-    if (payload.status === 'PAYMENT_SUCCESS') {
-      this.logger.log(`Payment confirmed for session ${payload.id}. Initiating Remote Start.`);
-
-      // Store approved state in Redis
-      await this.redis.set(`payment_status:${payload.id}`, 'SUCCESS', 'EX', 3600);
-      await this.redis.del(checkoutKey); // Remove pending checkout
-
-      // Notify websocket clients immediately that payment is cleared
-      this.wsGateway.emitChargerStatus(checkoutData.chargerId, WebSocketEvents.PAYMENT_APPROVED, {
-        chargerId: checkoutData.chargerId,
-        connectorId: checkoutData.connectorId,
-        paymentId: payload.id,
-      });
-
-      // 4. Trigger OCPP RemoteStartTransaction (Hardware controller call)
-      // Runs asynchronously to return quick 200 OK response to Paynamics notification caller
-      this.chargingService.triggerRemoteStart(
-        checkoutData.chargerId,
-        checkoutData.connectorId,
-        payload.id
-      ).catch((err) => {
-        this.logger.error(`Async RemoteStart trigger failed: ${err.message}`, err.stack);
-      });
-
-      return { status: 'PROCESSED' };
-    } else {
-      this.logger.warn(`Payment webhook received failed status: ${payload.status}`);
-      return { status: 'IGNORED' };
-    }
+    this.logger.log(
+      `Maya webhook received for payment ${payload?.id} (${payload?.status || payload?.paymentStatus})`,
+    );
+    return this.paymentsService.handleMayaWebhook(payload);
   }
 }

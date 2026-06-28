@@ -82,6 +82,8 @@ export interface AdapterConfig {
   wsPort: number;
   wsPath?: string;
   pricePerKwh?: number;
+  /** When non-empty, only these charger IDs may connect via OCPP WebSocket. */
+  allowedChargerIds?: string[];
   onAuthorize?: (idTag: string) => Promise<'Accepted' | 'Blocked' | 'Expired' | 'Invalid'>;
 }
 
@@ -104,6 +106,7 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
   private readonly wsPort: number;
   private readonly wsPath: string;
   private readonly pricePerKwh: number;
+  private readonly allowedChargerIds: Set<string>;
   private readonly onAuthorize?: (idTag: string) => Promise<'Accepted' | 'Blocked' | 'Expired' | 'Invalid'>;
 
   constructor(config: AdapterConfig) {
@@ -111,6 +114,7 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
     this.wsPort = config.wsPort;
     this.wsPath = config.wsPath || '/ocpp';
     this.pricePerKwh = config.pricePerKwh || 15;
+    this.allowedChargerIds = new Set(config.allowedChargerIds ?? []);
     this.onAuthorize = config.onAuthorize;
 
     this.wss = new WebSocketServer({
@@ -337,6 +341,13 @@ export class SteveOcppAdapter extends EventEmitter implements IChargerController
 
   private handleConnection(socket: WebSocket, rawUrl: string) {
     const chargerId = this.extractChargerId(rawUrl);
+
+    if (this.allowedChargerIds.size > 0 && !this.allowedChargerIds.has(chargerId)) {
+      console.warn(`[SteveOcppAdapter] Rejected connection from unlisted charger: ${chargerId}`);
+      socket.close(1008, 'Charger ID not allowed');
+      return;
+    }
+
     const charger = this.ensureChargerState(chargerId, 1);
     charger.socket = socket;
     charger.lastSeenAt = new Date().toISOString();

@@ -279,23 +279,6 @@ export class ChargingService implements OnModuleInit {
   }
 
   /**
-   * Initiates payment checkout via Paynamics gateway.
-   */
-  async initiateCheckout(chargerId: string, connectorId: number, tariffPlanId: string): Promise<{ checkoutId: string; redirectUrl: string }> {
-    this.logger.log(`Initiating checkout. Charger: ${chargerId}, Plan: ${tariffPlanId}`);
-
-    const checkoutId = `pnx_tx_${Math.floor(Math.random() * 1000000)}`;
-    const checkoutBase = process.env.PAYNAMICS_CHECKOUT_URL || 'https://www.paynamics.net/webpaymentservice/checkout';
-    const redirectUrl = `${checkoutBase}/${checkoutId}`;
-
-    // Save metadata in Redis for webhook validation
-    const checkoutSession = { chargerId, connectorId, tariffPlanId, status: 'PENDING' };
-    await this.redis.set(`checkout:${checkoutId}`, JSON.stringify(checkoutSession), 'EX', 600); // 10 min TTL
-
-    return { checkoutId, redirectUrl };
-  }
-
-  /**
    * Triggers RemoteStartTransaction on the charger via CSMS adapter using an RFID card.
    */
   async startRfidSession(chargerId: string, connectorId: number, rfidCardId: string): Promise<OcppRemoteStartResult> {

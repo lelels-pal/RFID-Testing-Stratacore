@@ -2,8 +2,11 @@ import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { Logger } from '@nestjs/common';
+import { validateProductionSecrets } from './config/startup-validation';
 
 async function bootstrap() {
+  validateProductionSecrets();
+
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 

@@ -1,0 +1,75 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    depends_on:
+      - redis
+    ports:
+      - '4001:4001'
+      - '9000:9000'
+    volumes:
+      - backend-rfids:/app/rfids.json
+    healthcheck:
+      test: ['CMD', 'curl', '-sf', 'http://localhost:4001/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  kiosk:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.kiosk
+      args:
+        NEXT_PUBLIC_BACKEND_URL: ${NEXT_PUBLIC_BACKEND_URL:-http://api.stratacore.tech}
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    depends_on:
+      - backend
+    ports:
+      - '3001:3001'
+
+  guest-app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.guest-app
+      args:
+        NEXT_PUBLIC_BACKEND_URL: ${NEXT_PUBLIC_BACKEND_URL:-http://api.stratacore.tech}
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    depends_on:
+      - backend
+    ports:
+      - '3002:3002'
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - kiosk
+      - guest-app
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  redis-data:
+  backend-rfids:
+  caddy-data:
+  caddy-config:

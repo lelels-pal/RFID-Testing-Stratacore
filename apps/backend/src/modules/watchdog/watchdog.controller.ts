@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Get, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { WatchdogService } from './watchdog.service';
+import { AdminAuthGuard } from '../admin-auth/admin-auth.guard';
 
 class WatchdogConfigUpdateDto {
   checkIntervalSeconds?: number;
@@ -8,6 +9,7 @@ class WatchdogConfigUpdateDto {
 }
 
 @Controller('api/watchdog')
+@UseGuards(AdminAuthGuard)
 export class WatchdogController {
   constructor(private readonly watchdogService: WatchdogService) {}
 

@@ -6,8 +6,10 @@ import { StaleSessionWatchdogService } from './stale-session-watchdog.service';
 import { WatchdogController } from './watchdog.controller';
 import { WatchdogEventLogService } from './watchdog-event-log.service';
 import { WatchdogService } from './watchdog.service';
+import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 
 @Module({
+  imports: [AdminAuthModule],
   controllers: [WatchdogController],
   providers: [
     WatchdogEventLogService,

@@ -1,0 +1,21 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json turbo.json ./
+COPY apps/guest-app/package.json apps/guest-app/
+COPY packages/shared/package.json packages/shared/
+RUN npm ci
+COPY packages/shared packages/shared
+COPY apps/guest-app apps/guest-app
+ARG NEXT_PUBLIC_BACKEND_URL=http://api.stratacore.tech
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+RUN npm run build --workspace=@packages/shared --workspace=guest-app
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/apps/guest-app/.next/standalone ./
+COPY --from=builder /app/apps/guest-app/.next/static ./apps/guest-app/.next/static
+COPY --from=builder /app/apps/guest-app/public ./apps/guest-app/public
+EXPOSE 3002
+ENV PORT=3002
+CMD ["node", "apps/guest-app/server.js"]

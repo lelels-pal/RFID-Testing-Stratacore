@@ -1,0 +1,28 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json turbo.json ./
+COPY apps/backend/package.json apps/backend/
+COPY packages/shared/package.json packages/shared/
+COPY packages/ocpp-adapter/package.json packages/ocpp-adapter/
+RUN npm ci
+COPY packages packages
+COPY apps/backend apps/backend
+RUN npm run build --workspace=@packages/shared --workspace=@packages/ocpp-adapter --workspace=backend
+
+FROM node:20-alpine
+WORKDIR /app
+RUN apk add --no-cache curl
+COPY package.json package-lock.json ./
+COPY apps/backend/package.json apps/backend/
+COPY packages/shared/package.json packages/shared/
+COPY packages/ocpp-adapter/package.json packages/ocpp-adapter/
+RUN npm ci --omit=dev
+COPY --from=builder /app/packages/shared/dist packages/shared/dist
+COPY --from=builder /app/packages/ocpp-adapter/dist packages/ocpp-adapter/dist
+COPY --from=builder /app/apps/backend/dist apps/backend/dist
+COPY apps/backend/rfids.json.example apps/backend/rfids.json.example
+COPY deploy/docker-entrypoint-backend.sh /docker-entrypoint.sh
+ENV NODE_ENV=production
+EXPOSE 4001 9000
+RUN chmod +x /docker-entrypoint.sh
+ENTRYPOINT ["/docker-entrypoint.sh"]

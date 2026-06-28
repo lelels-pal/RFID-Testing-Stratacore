@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import Redis from 'ioredis';
 
 interface RedisValue {
   value: string;
@@ -6,20 +7,53 @@ interface RedisValue {
 }
 
 @Injectable()
-export class RedisService {
+export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
   private readonly store = new Map<string, RedisValue>();
+  private client: Redis | null = null;
+  private useMemory = true;
+
+
+  async onModuleInit(): Promise<void> {
+    if (process.env.NODE_ENV !== 'production' || !this.client || this.useMemory) return;
+    try {
+      await this.client.ping();
+    } catch (err) {
+      throw new Error(`Production startup blocked — Redis unreachable: ${(err as Error).message}`);
+    }
+  }
 
   constructor() {
-    this.logger.log('Redis Mock Service Initialized.');
+    const redisUrl = process.env.REDIS_URL?.trim();
+    if (redisUrl) {
+      this.client = new Redis(redisUrl);
+      this.useMemory = false;
+      this.logger.log('Redis client initialized.');
+      return;
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      this.logger.warn('REDIS_URL is not set in production — using in-memory Redis fallback.');
+    } else {
+      this.logger.log('Redis Mock Service Initialized (no REDIS_URL).');
+    }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    if (this.client) {
+      await this.client.quit().catch(() => undefined);
+    }
   }
 
   async get(key: string): Promise<string | null> {
+    if (this.client && !this.useMemory) {
+      return this.client.get(key);
+    }
+
     const item = this.store.get(key);
     if (!item) return null;
 
     if (Date.now() > item.expiresAt) {
-      this.logger.debug(`Key expired in Redis: ${key}`);
       this.store.delete(key);
       return null;
     }
@@ -28,16 +62,24 @@ export class RedisService {
   }
 
   async set(key: string, value: string, mode?: 'EX', ttlSeconds?: number): Promise<void> {
-    const expiresAt = mode === 'EX' && ttlSeconds 
-      ? Date.now() + ttlSeconds * 1000 
-      : Infinity;
+    if (this.client && !this.useMemory) {
+      if (mode === 'EX' && ttlSeconds) {
+        await this.client.set(key, value, 'EX', ttlSeconds);
+      } else {
+        await this.client.set(key, value);
+      }
+      return;
+    }
 
+    const expiresAt = mode === 'EX' && ttlSeconds ? Date.now() + ttlSeconds * 1000 : Infinity;
     this.store.set(key, { value, expiresAt });
-    this.logger.debug(`Redis SET: ${key} -> (Expires in ${ttlSeconds || 'never'}s)`);
   }
 
   async del(key: string): Promise<void> {
+    if (this.client && !this.useMemory) {
+      await this.client.del(key);
+      return;
+    }
     this.store.delete(key);
-    this.logger.debug(`Redis DEL: ${key}`);
   }
 }

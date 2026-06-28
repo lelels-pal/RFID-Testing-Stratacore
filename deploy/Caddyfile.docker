@@ -1,0 +1,19 @@
+{
+	email admin@stratacore.tech
+}
+
+api.stratacore.tech {
+	reverse_proxy backend:4001
+}
+
+admin.stratacore.tech {
+	reverse_proxy kiosk:3001
+}
+
+guest.stratacore.tech {
+	reverse_proxy guest-app:3002
+}
+
+ocpp.stratacore.tech {
+	reverse_proxy backend:9000
+}

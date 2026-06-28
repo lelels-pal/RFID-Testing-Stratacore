@@ -1,0 +1,21 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json turbo.json ./
+COPY apps/kiosk/package.json apps/kiosk/
+COPY packages/shared/package.json packages/shared/
+RUN npm ci
+COPY packages/shared packages/shared
+COPY apps/kiosk apps/kiosk
+ARG NEXT_PUBLIC_BACKEND_URL=http://api.stratacore.tech
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+RUN npm run build --workspace=@packages/shared --workspace=kiosk
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/apps/kiosk/.next/standalone ./
+COPY --from=builder /app/apps/kiosk/.next/static ./apps/kiosk/.next/static
+COPY --from=builder /app/apps/kiosk/public ./apps/kiosk/public
+EXPOSE 3001
+ENV PORT=3001
+CMD ["node", "apps/kiosk/server.js"]

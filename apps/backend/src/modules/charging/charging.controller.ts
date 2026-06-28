@@ -1,7 +1,11 @@
-import { Controller, Post, Get, Put, Delete, Body, Param, Headers, Query, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { Controller, Post, Get, Put, Delete, Body, Param, Headers, Query, BadRequestException, UnauthorizedException, UseGuards, Req } from '@nestjs/common';
+import { Request } from 'express';
 import { ChargingService } from './charging.service';
 import { AuthService } from '../auth/auth.service';
 import { RfidService } from './rfid.service';
+import { PaymentsService } from '../payments/payments.service';
+import { ChargersConfigService } from '../chargers/chargers-config.service';
+import { AdminAuthGuard } from '../admin-auth/admin-auth.guard';
 import { CreateCheckoutRequest, CreateRfidRequest, UpdateRfidRequest, RfidStartRequest } from '@packages/shared';
 
 @Controller('api/v1/charging')
@@ -9,15 +13,24 @@ export class ChargingController {
   constructor(
     private readonly chargingService: ChargingService,
     private readonly authService: AuthService,
-    private readonly rfidService: RfidService
+    private readonly rfidService: RfidService,
+    private readonly paymentsService: PaymentsService,
+    private readonly chargersConfig: ChargersConfigService,
   ) {}
 
+  @Get('site-config')
+  getSiteConfig() {
+    return this.chargersConfig.getSiteConfig();
+  }
+
   @Get('rfid')
+  @UseGuards(AdminAuthGuard)
   async listRfids() {
     return this.rfidService.getAll();
   }
 
   @Get('ocpp-trace')
+  @UseGuards(AdminAuthGuard)
   async getOcppTrace(
     @Query('limit') limit?: string,
     @Query('rfidOnly') rfidOnly?: string,
@@ -28,6 +41,7 @@ export class ChargingController {
   }
 
   @Get('chargers')
+  @UseGuards(AdminAuthGuard)
   async listChargers(@Query('ids') ids?: string) {
     const chargerIds = ids
       ? ids.split(',').map((id) => id.trim()).filter(Boolean)
@@ -39,6 +53,7 @@ export class ChargingController {
   }
 
   @Post('rfid')
+  @UseGuards(AdminAuthGuard)
   async registerRfid(@Body() body: CreateRfidRequest) {
     if (!body.rfidCardId || !body.cardholderName || body.monthlyKwhLimit === undefined) {
       throw new BadRequestException('rfidCardId, cardholderName, and monthlyKwhLimit are required.');
@@ -47,22 +62,24 @@ export class ChargingController {
   }
 
   @Put('rfid/:cardId')
+  @UseGuards(AdminAuthGuard)
   async updateRfid(@Param('cardId') cardId: string, @Body() body: UpdateRfidRequest) {
     return this.rfidService.update(cardId, body);
   }
 
   @Delete('rfid/:cardId')
+  @UseGuards(AdminAuthGuard)
   async deleteRfid(@Param('cardId') cardId: string) {
     return this.rfidService.delete(cardId);
   }
 
   @Post('rfid/start')
+  @UseGuards(AdminAuthGuard)
   async startRfidSession(@Body() body: RfidStartRequest) {
     if (!body.chargerId || body.connectorId === undefined || !body.rfidCardId) {
       throw new BadRequestException('chargerId, connectorId, and rfidCardId are required.');
     }
 
-    // 1. Verify Card Quota before letting session begin
     const card = await this.rfidService.getById(body.rfidCardId);
     if (!card) {
       throw new BadRequestException('RFID Card not registered.');
@@ -74,11 +91,10 @@ export class ChargingController {
       throw new BadRequestException(`Card quota exhausted (${card.currentMonthKwhConsumed.toFixed(2)} / ${card.monthlyKwhLimit} kWh).`);
     }
 
-    // 2. Delegate remote start trigger to service
     return this.chargingService.startRfidSession(
       body.chargerId,
       body.connectorId,
-      card.rfidCardId
+      card.rfidCardId,
     );
   }
 
@@ -86,7 +102,8 @@ export class ChargingController {
   async checkout(
     @Headers('authorization') authHeader: string,
     @Headers('x-device-fingerprint') fingerprint: string,
-    @Body() body: CreateCheckoutRequest
+    @Body() body: CreateCheckoutRequest,
+    @Req() req: Request,
   ) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new UnauthorizedException('Authentication token missing.');
@@ -96,18 +113,18 @@ export class ChargingController {
     }
 
     const token = authHeader.split(' ')[1];
-    
-    // Validate session binding to prevent session hijacking
     const session = this.authService.validateGuestToken(token, fingerprint);
 
     if (session.chargerId !== body.chargerId || session.connectorId !== body.connectorId) {
       throw new BadRequestException('Requested charger details do not match active handshake.');
     }
 
-    return this.chargingService.initiateCheckout(
+    const guestAppOrigin = req.get('x-guest-app-origin') || req.get('origin') || undefined;
+    return this.paymentsService.createCheckout(
       body.chargerId,
       body.connectorId,
-      body.tariffPlanId
+      body.tariffPlanId,
+      guestAppOrigin,
     );
   }
 
@@ -115,7 +132,7 @@ export class ChargingController {
   async stop(
     @Headers('authorization') authHeader: string,
     @Headers('x-device-fingerprint') fingerprint: string,
-    @Body() body: { transactionId?: number }
+    @Body() body: { transactionId?: number },
   ) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new UnauthorizedException('Authentication token missing.');
@@ -127,17 +144,11 @@ export class ChargingController {
     const token = authHeader.split(' ')[1];
     const session = this.authService.validateGuestToken(token, fingerprint);
 
-    // transactionId is optional — the central system resolves the charger's
-    // active transaction when the guest does not track one client-side.
     return this.chargingService.triggerRemoteStop(session.chargerId, body?.transactionId);
   }
 
-  /**
-   * Operator override stop, triggered from the trusted physical Kiosk screen.
-   * The kiosk has no guest JWT, so this is keyed only by chargerId. Intended
-   * for the local, attended kiosk device on the station network.
-   */
   @Post('kiosk/stop')
+  @UseGuards(AdminAuthGuard)
   async kioskStop(@Body() body: { chargerId: string }) {
     if (!body?.chargerId) {
       throw new BadRequestException('chargerId is required.');
